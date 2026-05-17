@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crypto Signal Bot</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    min-height: 100vh;
+    padding: 20px;
+  }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  h1 { font-size: 1.4rem; color: #58a6ff; }
+
+  .meta {
+    font-size: 0.8rem;
+    color: #8b949e;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .btn-refresh {
+    background: #21262d;
+    border: 1px solid #30363d;
+    color: #58a6ff;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    transition: background 0.2s;
+  }
+  .btn-refresh:hover { background: #30363d; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px;
+  }
+
+  .card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+  }
+  .card.long::before  { background: #2ea043; }
+  .card.short::before { background: #da3633; }
+  .card.neutral::before { background: #8b949e; }
+
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 16px;
+  }
+
+  .asset-name { font-size: 1.3rem; font-weight: 700; }
+  .asset-price { font-size: 1.1rem; color: #8b949e; }
+
+  .signal-badge {
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  .badge-long    { background: #0f3320; color: #2ea043; border: 1px solid #2ea043; }
+  .badge-short   { background: #3d0f0f; color: #da3633; border: 1px solid #da3633; }
+  .badge-neutral { background: #1c2128; color: #8b949e; border: 1px solid #8b949e; }
+
+  .score-section { margin-bottom: 16px; }
+
+  .score-label {
+    font-size: 0.75rem;
+    color: #8b949e;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .score-bar {
+    background: #21262d;
+    border-radius: 4px;
+    height: 8px;
+    overflow: hidden;
+  }
+
+  .score-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.6s ease;
+  }
+  .fill-long    { background: #2ea043; }
+  .fill-short   { background: #da3633; }
+  .fill-neutral { background: #8b949e; }
+
+  .indicators {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .kpi {
+    background: #0d1117;
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+  .kpi-label { font-size: 0.7rem; color: #8b949e; margin-bottom: 2px; }
+  .kpi-value { font-size: 0.95rem; font-weight: 600; }
+
+  .conditions { margin-bottom: 16px; }
+  .cond-title {
+    font-size: 0.75rem;
+    color: #8b949e;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .cond-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    padding: 3px 0;
+    color: #8b949e;
+  }
+  .cond-item.pass { color: #e6edf3; }
+
+  .cond-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dot-pass { background: #2ea043; }
+  .dot-fail { background: #da3633; }
+
+  .levels {
+    background: #0d1117;
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 0.8rem;
+  }
+  .levels-title {
+    color: #8b949e;
+    margin-bottom: 8px;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+  }
+  .level-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+  }
+  .level-sl  { color: #da3633; }
+  .level-tp1 { color: #2ea043; }
+  .level-tp2 { color: #56d364; }
+
+  .trend-1d {
+    display: inline-block;
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 12px;
+  }
+  .trend-alcista { background: #0f3320; color: #2ea043; }
+  .trend-bajista { background: #3d0f0f; color: #da3633; }
+  .trend-lateral { background: #1c2128; color: #8b949e; }
+
+  .alert-rsi {
+    background: #2d2100;
+    border: 1px solid #bb8009;
+    color: #f0b429;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.78rem;
+    margin-bottom: 12px;
+  }
+
+  .error-card {
+    background: #3d0f0f;
+    border-color: #da3633;
+    color: #da3633;
+    padding: 20px;
+    border-radius: 12px;
+    text-align: center;
+  }
+
+  .loading {
+    text-align: center;
+    color: #8b949e;
+    padding: 60px;
+    font-size: 1rem;
+  }
+
+  @media (max-width: 500px) {
+    body { padding: 12px; }
+    .indicators { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>📊 Crypto Signal Bot</h1>
+    <div class="meta">
+      <span id="last-update">Cargando...</span>
+    </div>
+  </div>
+  <button class="btn-refresh" onclick="forceRefresh()">🔄 Actualizar</button>
+</header>
+
+<div id="grid" class="grid">
+  <div class="loading">Cargando análisis...</div>
+</div>
+
+<script>
+async function loadData() {
+  try {
+    const r = await fetch('/api/data');
+    const data = await r.json();
+
+    document.getElementById('last-update').textContent =
+      'Última actualización: ' + (data.last_update || '—');
+
+    renderGrid(data.results || []);
+  } catch(e) {
+    document.getElementById('grid').innerHTML =
+      '<div class="error-card">Error al cargar datos</div>';
+  }
+}
+
+function getSignalClass(signal) {
+  if (!signal) return 'neutral';
+  if (signal.includes('LONG'))  return 'long';
+  if (signal.includes('SHORT')) return 'short';
+  return 'neutral';
+}
+
+function getBadgeClass(signal) {
+  if (!signal) return 'badge-neutral';
+  if (signal.includes('LONG'))  return 'badge-long';
+  if (signal.includes('SHORT')) return 'badge-short';
+  return 'badge-neutral';
+}
+
+function getFillClass(signal) {
+  if (!signal) return 'fill-neutral';
+  if (signal.includes('LONG'))  return 'fill-long';
+  if (signal.includes('SHORT')) return 'fill-short';
+  return 'fill-neutral';
+}
+
+function getTrendClass(trend) {
+  if (!trend) return 'trend-lateral';
+  if (trend === 'ALCISTA') return 'trend-alcista';
+  if (trend === 'BAJISTA') return 'trend-bajista';
+  return 'trend-lateral';
+}
+
+function scoreWidth(score, max) {
+  // Normaliza score de -max a +max en 0-100%
+  return Math.round(((score + max) / (max * 2)) * 100);
+}
+
+function renderCard(r) {
+  if (r.error) {
+    return `<div class="error-card">
+      <strong>${r.name}</strong><br>
+      Error: ${r.error}
+    </div>`;
+  }
+
+  const sc = getSignalClass(r.signal);
+  const bc = getBadgeClass(r.signal);
+  const fc = getFillClass(r.signal);
+  const tc = getTrendClass(r.trend_1d);
+  const sw = scoreWidth(r.score, r.max_score);
+
+  const isLong  = r.signal && r.signal.includes('LONG');
+  const isShort = r.signal && r.signal.includes('SHORT');
+
+  const lvl = r.levels || {};
+  const sl  = isLong  ? lvl.stop_long  : isShort ? lvl.stop_short  : null;
+  const tp1 = isLong  ? lvl.tp1_long   : isShort ? lvl.tp1_short   : null;
+  const tp2 = isLong  ? lvl.tp2_long   : isShort ? lvl.tp2_short   : null;
+
+  const condHtml = Object.entries(r.conditions || {}).map(([k, v]) =>
+    `<div class="cond-item ${v ? 'pass' : ''}">
+      <div class="cond-dot ${v ? 'dot-pass' : 'dot-fail'}"></div>
+      ${k}
+    </div>`
+  ).join('');
+
+  const rsiAlert = r.rsi6_oversold
+    ? `<div class="alert-rsi">⚠️ RSI(6) en sobreventa (${r.rsi6}) — posible rebote técnico</div>`
+    : r.rsi6_overbought
+    ? `<div class="alert-rsi">⚠️ RSI(6) en sobrecompra (${r.rsi6}) — posible corrección</div>`
+    : '';
+
+  const levelsHtml = (sl && tp1 && tp2) ? `
+    <div class="levels">
+      <div class="levels-title">Niveles sugeridos (ATR×2)</div>
+      <div class="level-row"><span class="level-sl">🛑 Stop Loss</span><span class="level-sl">$${Number(sl).toLocaleString()}</span></div>
+      <div class="level-row"><span class="level-tp1">🎯 TP1</span><span class="level-tp1">$${Number(tp1).toLocaleString()}</span></div>
+      <div class="level-row"><span class="level-tp2">🎯 TP2</span><span class="level-tp2">$${Number(tp2).toLocaleString()}</span></div>
+    </div>` : '';
+
+  return `
+  <div class="card ${sc}">
+    <div class="card-header">
+      <div>
+        <div class="asset-name">${r.name}/USDT</div>
+        <div class="asset-price">$${Number(r.price).toLocaleString()}</div>
+      </div>
+      <div class="signal-badge ${bc}">${r.signal || 'NEUTRAL'}</div>
+    </div>
+
+    <span class="trend-1d ${tc}">1D: ${r.trend_1d || '—'}</span>
+
+    <div class="score-section">
+      <div class="score-label">
+        <span>Score de señal</span>
+        <span>${r.score > 0 ? '+' : ''}${r.score} / ${r.max_score}</span>
+      </div>
+      <div class="score-bar">
+        <div class="score-fill ${fc}" style="width:${sw}%"></div>
+      </div>
+    </div>
+
+    ${rsiAlert}
+
+    <div class="indicators">
+      <div class="kpi">
+        <div class="kpi-label">RSI (6)</div>
+        <div class="kpi-value" style="color:${r.rsi6 < 30 ? '#f0b429' : r.rsi6 > 70 ? '#f0b429' : '#e6edf3'}">${r.rsi6}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">RSI (20)</div>
+        <div class="kpi-value">${r.rsi20}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">MACD hist</div>
+        <div class="kpi-value" style="color:${r.macd_hist > 0 ? '#2ea043' : '#da3633'}">${r.macd_hist}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">EMA 20</div>
+        <div class="kpi-value">$${Number(r.ema20).toLocaleString()}</div>
+      </div>
+    </div>
+
+    <div class="conditions">
+      <div class="cond-title">Condiciones</div>
+      ${condHtml}
+    </div>
+
+    ${levelsHtml}
+  </div>`;
+}
+
+function renderGrid(results) {
+  if (!results.length) {
+    document.getElementById('grid').innerHTML =
+      '<div class="loading">Sin datos aún</div>';
+    return;
+  }
+  document.getElementById('grid').innerHTML =
+    results.map(renderCard).join('');
+}
+
+async function forceRefresh() {
+  document.getElementById('grid').innerHTML =
+    '<div class="loading">Actualizando...</div>';
+  await fetch('/api/refresh');
+  await loadData();
+}
+
+// Cargar al inicio y cada 5 minutos
+loadData();
+setInterval(loadData, 5 * 60 * 1000);
+</script>
+</body>
+</html>
