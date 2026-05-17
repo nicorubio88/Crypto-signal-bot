@@ -11,35 +11,50 @@ from datetime import datetime
 # ── Configuración ────────────────────────────────────────────────────────────
 
 SYMBOLS = {
-    "BTC": "BTCUSDT",
-    "ETH": "ETHUSDT",
-    "SOL": "SOLUSDT",
-    "XRP": "XRPUSDT",
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "SOL": "solana",
+    "XRP": "ripple",
 }
 
-BINANCE_URL = "https://api.binance.com/api/v3/klines"  # Spot (funciona sin restricciones geo)
+COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/{id}/ohlc"
+
+INTERVAL_DAYS = {
+    "4h":  30,
+    "1d":  365,
+}
 
 # ── Fetch de velas ───────────────────────────────────────────────────────────
 
 def fetch_candles(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
     """
-    Descarga velas de Binance y devuelve DataFrame limpio.
+    Descarga velas de CoinGecko y devuelve DataFrame limpio.
     interval: '4h' | '1d'
-    limit: cantidad de velas (300 es suficiente para EMA200)
     """
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    resp = requests.get(BINANCE_URL, params=params, timeout=10)
+    days = INTERVAL_DAYS.get(interval, 30)
+    url = COINGECKO_URL.format(id=symbol)
+    params = {"vs_currency": "usd", "days": days}
+
+    resp = requests.get(url, params=params, timeout=15)
     resp.raise_for_status()
 
     raw = resp.json()
-    df = pd.DataFrame(raw, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "quote_vol", "trades", "taker_base", "taker_quote", "ignore"
-    ])
+    df = pd.DataFrame(raw, columns=["open_time", "open", "high", "low", "close"])
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+    df["volume"] = df["close"]  # CoinGecko OHLC no trae volumen por vela
+
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
+
     df.set_index("open_time", inplace=True)
+
+    # Resamplear al intervalo correcto
+    rule = "4h" if interval == "4h" else "1D"
+    df = df.resample(rule).agg({
+        "open": "first", "high": "max",
+        "low": "min", "close": "last", "volume": "sum"
+    }).dropna()
+
     return df[["open", "high", "low", "close", "volume"]]
 
 
