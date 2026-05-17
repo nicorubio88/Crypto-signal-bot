@@ -15,8 +15,9 @@
   .tab.active { background: #58a6ff; color: #0d1117; border-color: #58a6ff; font-weight: 600; }
   .btn { background: #21262d; border: 1px solid #30363d; color: #58a6ff; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.82rem; }
   .btn:hover { background: #30363d; }
+  .btn-primary { background: #2ea043; color: white; border-color: #2ea043; }
+  .btn-danger { background: #da3633; color: white; border-color: #da3633; }
 
-  /* Cards */
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; position: relative; overflow: hidden; }
   .card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
@@ -34,22 +35,19 @@
   .badge-short { background: #3d0f0f; color: #da3633; border: 1px solid #da3633; }
   .badge-neutral { background: #1c2128; color: #8b949e; border: 1px solid #8b949e; }
 
-  .confidence-badge { padding: 3px 10px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.5px; }
+  .confidence-badge { padding: 3px 10px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
   .conf-alta { background: #0f3320; color: #2ea043; }
   .conf-media { background: #2d2100; color: #f0b429; }
   .conf-baja { background: #1c2128; color: #8b949e; }
 
   .signal-reason { font-size: 0.78rem; color: #8b949e; margin-top: 4px; font-style: italic; }
 
-  /* Trends multi-timeframe */
   .trends-row { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
-  .trend-pill { font-size: 0.7rem; padding: 3px 8px; border-radius: 4px; display: flex; align-items: center; gap: 4px; }
+  .trend-pill { font-size: 0.7rem; padding: 3px 8px; border-radius: 4px; }
   .trend-alcista { background: #0f3320; color: #2ea043; }
   .trend-bajista { background: #3d0f0f; color: #da3633; }
   .trend-lateral { background: #1c2128; color: #8b949e; }
-  .trend-label { font-size: 0.62rem; opacity: 0.7; }
 
-  /* Score bar */
   .score-section { margin-bottom: 14px; }
   .score-label { font-size: 0.75rem; color: #8b949e; margin-bottom: 6px; display: flex; justify-content: space-between; }
   .score-bar { background: #21262d; border-radius: 4px; height: 8px; overflow: hidden; position: relative; }
@@ -59,7 +57,6 @@
   .fill-short { background: linear-gradient(270deg, #da3633, #f85149); }
   .fill-neutral { background: #8b949e; }
 
-  /* ADX indicator */
   .adx-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; padding: 8px; background: #0d1117; border-radius: 6px; }
   .adx-label { font-size: 0.7rem; color: #8b949e; }
   .adx-value { font-size: 0.9rem; font-weight: 700; }
@@ -67,20 +64,16 @@
   .adx-warn { color: #f0b429; }
   .adx-bad { color: #da3633; }
 
-  /* Warnings */
   .warning { background: #2d2100; border: 1px solid #bb8009; color: #f0b429; border-radius: 6px; padding: 8px 10px; font-size: 0.75rem; margin-bottom: 12px; }
   .alert-rsi { background: #2d2100; border: 1px solid #bb8009; color: #f0b429; border-radius: 6px; padding: 6px 10px; font-size: 0.75rem; margin-bottom: 10px; }
   .div-alert { background: #0f3320; border: 1px solid #2ea043; color: #2ea043; border-radius: 6px; padding: 6px 10px; font-size: 0.75rem; margin-bottom: 10px; }
   .div-alert.bearish { background: #3d0f0f; border-color: #da3633; color: #da3633; }
-  .close-alert { background: #3d0f0f; border: 1px solid #da3633; color: #da3633; border-radius: 6px; padding: 8px 10px; font-size: 0.75rem; margin-bottom: 10px; }
 
-  /* KPIs */
   .indicators { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 14px; }
   .kpi { background: #0d1117; border-radius: 6px; padding: 6px 8px; }
   .kpi-label { font-size: 0.65rem; color: #8b949e; margin-bottom: 2px; }
   .kpi-value { font-size: 0.85rem; font-weight: 600; }
 
-  /* Levels */
   .levels { background: #0d1117; border-radius: 8px; padding: 10px; font-size: 0.78rem; margin-bottom: 10px; }
   .levels-title { color: #8b949e; margin-bottom: 6px; font-size: 0.72rem; text-transform: uppercase; }
   .level-row { display: flex; justify-content: space-between; padding: 2px 0; }
@@ -90,7 +83,6 @@
   .level-tp3 { color: #7ee787; }
   .level-rr { color: #8b949e; font-size: 0.7rem; text-align: right; margin-top: 4px; }
 
-  /* Pivots */
   .pivots { background: #0d1117; border-radius: 8px; padding: 10px; font-size: 0.75rem; margin-bottom: 10px; }
   .pivots-title { color: #8b949e; margin-bottom: 6px; font-size: 0.7rem; text-transform: uppercase; }
   .pivot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
@@ -99,7 +91,6 @@
   .pivot-s { color: #2ea043; }
   .pivot-p { color: #58a6ff; }
 
-  /* Conditions */
   .conditions { margin-bottom: 12px; }
   .cond-title { font-size: 0.72rem; color: #8b949e; margin-bottom: 6px; text-transform: uppercase; }
   .cond-item { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; padding: 2px 0; color: #6e7681; }
@@ -108,7 +99,67 @@
   .dot-pass { background: #2ea043; }
   .dot-fail { background: #6e7681; }
 
-  /* Stats panel */
+  /* Operaciones */
+  .ops-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .summary-card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px; }
+  .summary-label { font-size: 0.72rem; color: #8b949e; }
+  .summary-value { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
+
+  .op-card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 16px; margin-bottom: 14px; position: relative; }
+  .op-card.long { border-left: 4px solid #2ea043; }
+  .op-card.short { border-left: 4px solid #da3633; }
+
+  .op-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+  .op-title { font-size: 1.1rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .op-leverage { font-size: 0.7rem; padding: 2px 6px; background: #f0b429; color: #0d1117; border-radius: 3px; font-weight: 700; }
+  .op-direction-long { color: #2ea043; }
+  .op-direction-short { color: #da3633; }
+
+  .op-pnl { font-size: 1.3rem; font-weight: 700; }
+  .pnl-pos { color: #2ea043; }
+  .pnl-neg { color: #da3633; }
+
+  .op-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .op-field { background: #0d1117; border-radius: 6px; padding: 7px 9px; }
+  .op-field-label { font-size: 0.63rem; color: #8b949e; }
+  .op-field-value { font-size: 0.85rem; font-weight: 600; margin-top: 2px; }
+
+  .levels-progress { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px; margin: 10px 0; font-size: 0.7rem; }
+  .level-item { background: #0d1117; padding: 6px; border-radius: 5px; text-align: center; border: 1px solid #21262d; }
+  .level-item.reached { background: #0f3320; border-color: #2ea043; }
+  .level-item.warn { background: #2d2100; border-color: #f0b429; }
+  .level-item.danger { background: #3d0f0f; border-color: #da3633; }
+  .level-item-label { color: #8b949e; font-size: 0.62rem; }
+  .level-item-price { font-weight: 700; margin: 2px 0; }
+  .level-item-dist { font-size: 0.65rem; color: #6e7681; }
+
+  .op-alerts { margin: 10px 0; }
+  .op-alert { padding: 7px 10px; border-radius: 6px; font-size: 0.75rem; margin-bottom: 5px; }
+  .op-alert-warn { background: #2d2100; border: 1px solid #bb8009; color: #f0b429; }
+  .op-alert-danger { background: #3d0f0f; border: 1px solid #da3633; color: #da3633; }
+  .op-alert-info { background: #1c2128; border: 1px solid #30363d; color: #8b949e; }
+
+  .op-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+  /* Modal */
+  .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
+  .modal-overlay.show { display: flex; }
+  .modal { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; max-width: 500px; width: 100%; max-height: 90vh; overflow-y: auto; }
+  .modal-title { font-size: 1.1rem; margin-bottom: 16px; color: #58a6ff; }
+  .form-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+  .form-row label { font-size: 0.75rem; color: #8b949e; }
+  .form-row input, .form-row select, .form-row textarea {
+    background: #0d1117; border: 1px solid #30363d; color: #e6edf3;
+    padding: 8px 10px; border-radius: 6px; font-size: 0.85rem;
+    font-family: inherit;
+  }
+  .form-row textarea { min-height: 60px; resize: vertical; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .form-help { font-size: 0.7rem; color: #6e7681; margin-top: 2px; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+  .empty-state { text-align: center; color: #8b949e; padding: 40px 20px; background: #161b22; border-radius: 12px; }
+
   .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
   .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; }
   .stat-asset { font-size: 1.1rem; font-weight: 700; margin-bottom: 16px; color: #58a6ff; }
@@ -120,20 +171,18 @@
   .wr-good { color: #2ea043; }
   .wr-bad { color: #da3633; }
   .wr-neutral { color: #8b949e; }
-  .recent-title { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; margin-bottom: 8px; }
   .signal-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #21262d; font-size: 0.8rem; }
   .signal-row:last-child { border-bottom: none; }
   .sig-date { color: #8b949e; font-size: 0.7rem; }
-  .sig-result { display: flex; gap: 4px; align-items: center; }
-  .res-dot { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.65rem; font-weight: 700; }
+  .res-dot { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 0.65rem; font-weight: 700; margin: 0 2px; }
   .res-win { background: #0f3320; color: #2ea043; }
   .res-loss { background: #3d0f0f; color: #da3633; }
   .res-pending { background: #1c2128; color: #8b949e; }
-  .no-data { text-align: center; color: #8b949e; padding: 40px; font-size: 0.9rem; }
+  .recent-title { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; margin: 16px 0 8px; }
   .loading { text-align: center; color: #8b949e; padding: 60px; }
   .hidden { display: none; }
 
-  @media (max-width: 500px) {
+  @media (max-width: 600px) {
     body { padding: 12px; }
     .indicators { grid-template-columns: 1fr 1fr; }
   }
@@ -151,234 +200,584 @@
 
 <div class="tabs">
   <div class="tab active" onclick="showTab('signals')">Señales en vivo</div>
+  <div class="tab" onclick="showTab('ops')">Mis operaciones</div>
   <div class="tab" onclick="showTab('stats')">Acertividad</div>
-  <div class="tab" onclick="showTab('history')">Historial</div>
+  <div class="tab" onclick="showTab('history')">Historial señales</div>
 </div>
 
-<div id="tab-signals">
-  <div id="grid" class="grid"><div class="loading">Cargando análisis...</div></div>
+<div id="tab-signals"><div id="grid" class="grid"><div class="loading">Cargando...</div></div></div>
+
+<div id="tab-ops" class="hidden">
+  <div id="ops-summary"></div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <h2 style="font-size:1rem;color:#58a6ff">Operaciones abiertas</h2>
+    <button class="btn btn-primary" onclick="openNewOp()">+ Nueva operación</button>
+  </div>
+  <div id="ops-open"></div>
+  <h2 style="font-size:1rem;color:#58a6ff;margin:24px 0 12px">Historial</h2>
+  <div id="ops-closed"></div>
 </div>
 
 <div id="tab-stats" class="hidden">
-  <div id="stats-grid" class="stats-grid"><div class="loading">Cargando estadísticas...</div></div>
+  <div id="stats-grid" class="stats-grid"><div class="loading">Cargando...</div></div>
 </div>
 
 <div id="tab-history" class="hidden">
-  <div id="history-table"><div class="loading">Cargando historial...</div></div>
+  <div id="history-table"><div class="loading">Cargando...</div></div>
+</div>
+
+<!-- Modal Nueva Operacion -->
+<div class="modal-overlay" id="modal-new">
+  <div class="modal">
+    <div class="modal-title">Nueva operación</div>
+    <div class="form-grid">
+      <div class="form-row">
+        <label>Activo</label>
+        <select id="op-asset" onchange="suggestLevels()">
+          <option value="BTC">BTC</option>
+          <option value="ETH">ETH</option>
+          <option value="SOL">SOL</option>
+          <option value="XRP">XRP</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Dirección</label>
+        <select id="op-direction" onchange="suggestLevels()">
+          <option value="LONG">LONG</option>
+          <option value="SHORT">SHORT</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row">
+        <label>Precio entrada</label>
+        <input id="op-entry" type="number" step="any" oninput="recalcSize()">
+        <span class="form-help" id="op-current-price"></span>
+      </div>
+      <div class="form-row">
+        <label>Apalancamiento</label>
+        <select id="op-leverage" onchange="recalcSize()">
+          <option value="1">1x (Spot equivalente)</option>
+          <option value="3">3x</option>
+          <option value="5" selected>5x</option>
+          <option value="10">10x</option>
+          <option value="20">20x</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label>Capital total disponible (USD)</label>
+      <input id="op-capital" type="number" step="any" value="10000" oninput="recalcSize()">
+      <span class="form-help">Se usa para calcular el tamaño sugerido (2.5% de riesgo)</span>
+    </div>
+
+    <div class="form-grid">
+      <div class="form-row">
+        <label>Tamaño (unidades)</label>
+        <input id="op-size" type="number" step="any">
+        <span class="form-help" id="op-size-info"></span>
+      </div>
+      <div class="form-row">
+        <label>Modo margen</label>
+        <select id="op-margin">
+          <option value="ISOLATED">Aislado</option>
+          <option value="CROSSED">Cruzado</option>
+        </select>
+      </div>
+    </div>
+
+    <h3 style="font-size:0.8rem;color:#8b949e;margin:8px 0 6px;text-transform:uppercase">Niveles (sugerido por ATR)</h3>
+    <div class="form-grid">
+      <div class="form-row">
+        <label>Stop Loss</label>
+        <input id="op-stop" type="number" step="any">
+      </div>
+      <div class="form-row">
+        <label>TP1 (40%)</label>
+        <input id="op-tp1" type="number" step="any">
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row">
+        <label>TP2 (40%)</label>
+        <input id="op-tp2" type="number" step="any">
+      </div>
+      <div class="form-row">
+        <label>TP3 (20%)</label>
+        <input id="op-tp3" type="number" step="any">
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label>Notas (opcional)</label>
+      <textarea id="op-notes" placeholder="Por qué entré, plan de salida..."></textarea>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('modal-new')">Cancelar</button>
+      <button class="btn btn-primary" onclick="submitNewOp()">Abrir operación</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Cerrar Operacion -->
+<div class="modal-overlay" id="modal-close">
+  <div class="modal">
+    <div class="modal-title">Cerrar operación</div>
+    <div class="form-row">
+      <label>Precio de salida</label>
+      <input id="close-price" type="number" step="any">
+    </div>
+    <div class="form-row">
+      <label>Motivo</label>
+      <select id="close-reason">
+        <option value="manual">Cierre manual</option>
+        <option value="tp1">TP1 alcanzado</option>
+        <option value="tp2">TP2 alcanzado</option>
+        <option value="tp3">TP3 alcanzado</option>
+        <option value="stop_loss">Stop Loss</option>
+        <option value="bot_signal">Señal del bot</option>
+        <option value="other">Otro</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('modal-close')">Cancelar</button>
+      <button class="btn btn-danger" onclick="submitCloseOp()">Cerrar operación</button>
+    </div>
+  </div>
 </div>
 
 <script>
 let currentTab = 'signals';
+let marketData = [];
+let closingOpId = null;
 
 function showTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach((t, i) => {
-    t.classList.toggle('active', ['signals','stats','history'][i] === tab);
+    t.classList.toggle('active', ['signals','ops','stats','history'][i] === tab);
   });
-  document.getElementById('tab-signals').classList.toggle('hidden', tab !== 'signals');
-  document.getElementById('tab-stats').classList.toggle('hidden', tab !== 'stats');
-  document.getElementById('tab-history').classList.toggle('hidden', tab !== 'history');
+  ['signals','ops','stats','history'].forEach(t => {
+    document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
+  });
+  if (tab === 'ops') loadOperations();
   if (tab === 'stats') loadStats();
   if (tab === 'history') loadHistory();
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function sigClass(s) { return s?.includes('LONG') ? 'long' : s?.includes('SHORT') ? 'short' : 'neutral'; }
 function badgeClass(s) { return s?.includes('LONG') ? 'badge-long' : s?.includes('SHORT') ? 'badge-short' : 'badge-neutral'; }
 function fillClass(s) { return s?.includes('LONG') ? 'fill-long' : s?.includes('SHORT') ? 'fill-short' : 'fill-neutral'; }
 function trendClass(t) { return t === 'ALCISTA' ? 'trend-alcista' : t === 'BAJISTA' ? 'trend-bajista' : 'trend-lateral'; }
 function confClass(c) { return c === 'ALTA' ? 'conf-alta' : c === 'MEDIA' ? 'conf-media' : 'conf-baja'; }
+function adxClass(a) { return a >= 30 ? 'adx-good' : a >= 25 ? 'adx-warn' : 'adx-bad'; }
 function scoreWidth(score, max) { return Math.round(((score + max) / (max * 2)) * 100); }
 function fmt(n) { return n != null ? Number(n).toLocaleString(undefined, {maximumFractionDigits: 4}) : '—'; }
-function adxClass(a) { return a >= 30 ? 'adx-good' : a >= 25 ? 'adx-warn' : 'adx-bad'; }
 
-// ── Render Card ──────────────────────────────────────────────────────────────
+// ── Señales ──────────────────────────────────────────────────────────────────
 
 function renderCard(r) {
   if (r.error) return `<div class="card"><div style="color:#da3633">${r.name}: ${r.error}</div></div>`;
-
   const sc = sigClass(r.signal), bc = badgeClass(r.signal), fc = fillClass(r.signal);
   const sw = scoreWidth(r.score, r.max_score);
   const isLong = r.signal?.includes('LONG'), isShort = r.signal?.includes('SHORT');
 
-  // Trends multi-timeframe
-  const trendsHtml = `
-    <div class="trends-row">
-      <span class="trend-pill ${trendClass(r.trend_1w)}"><span class="trend-label">1W</span> ${r.trend_1w || '—'}</span>
-      <span class="trend-pill ${trendClass(r.trend_1d)}"><span class="trend-label">1D</span> ${r.trend_1d || '—'}</span>
-      <span class="trend-pill ${trendClass(r.trend_1h)}"><span class="trend-label">1H</span> ${r.trend_1h || '—'}</span>
-    </div>`;
+  const trendsHtml = `<div class="trends-row">
+    <span class="trend-pill ${trendClass(r.trend_1w)}">1W: ${r.trend_1w || '—'}</span>
+    <span class="trend-pill ${trendClass(r.trend_1d)}">1D: ${r.trend_1d || '—'}</span>
+    <span class="trend-pill ${trendClass(r.trend_1h)}">1H: ${r.trend_1h || '—'}</span>
+  </div>`;
 
-  // ADX bar
-  const adxHtml = r.adx != null ? `
-    <div class="adx-row">
-      <span class="adx-label">ADX:</span>
-      <span class="adx-value ${adxClass(r.adx)}">${r.adx}</span>
-      <span style="margin-left:auto;font-size:0.7rem;color:#8b949e">
-        ${r.market_trending ? '✓ Tendencia clara' : '⚠ Mercado lateral'}
-      </span>
-    </div>` : '';
+  const adxHtml = r.adx != null ? `<div class="adx-row">
+    <span class="adx-label">ADX:</span>
+    <span class="adx-value ${adxClass(r.adx)}">${r.adx}</span>
+    <span style="margin-left:auto;font-size:0.7rem;color:#8b949e">${r.market_trending ? 'Tendencia clara' : 'Mercado lateral'}</span>
+  </div>` : '';
 
-  // Warnings
-  const warningsHtml = (r.warnings || []).map(w => `<div class="warning">⚠ ${w}</div>`).join('');
+  const warningsHtml = (r.warnings || []).map(w => `<div class="warning">${w}</div>`).join('');
 
-  // Divergencias
   let divHtml = '';
-  if (r.divergence?.bullish) divHtml += `<div class="div-alert">📈 Divergencia RSI alcista detectada (+3 puntos)</div>`;
-  if (r.divergence?.bearish) divHtml += `<div class="div-alert bearish">📉 Divergencia RSI bajista detectada (-3 puntos)</div>`;
+  if (r.divergence?.bullish) divHtml += `<div class="div-alert">Divergencia RSI alcista (+3 puntos)</div>`;
+  if (r.divergence?.bearish) divHtml += `<div class="div-alert bearish">Divergencia RSI bajista (-3 puntos)</div>`;
+  if (r.obv_divergence?.bullish) divHtml += `<div class="div-alert">Divergencia OBV alcista — acumulación detectada (+2 puntos)</div>`;
+  if (r.obv_divergence?.bearish) divHtml += `<div class="div-alert bearish">Divergencia OBV bajista — distribución detectada (-2 puntos)</div>`;
+  if (r.bb_squeeze) divHtml += `<div class="alert-rsi">Bollinger Squeeze — movimiento próximo</div>`;
+  if (r.rsi6_oversold) divHtml += `<div class="alert-rsi">RSI(6) sobreventa (${r.rsi6})</div>`;
+  if (r.rsi6_overbought) divHtml += `<div class="alert-rsi">RSI(6) sobrecompra (${r.rsi6})</div>`;
 
-  // BB Squeeze
-  if (r.bb_squeeze) divHtml += `<div class="alert-rsi">⚡ Bollinger Squeeze — movimiento fuerte próximo</div>`;
-
-  // RSI extremos
-  if (r.rsi6_oversold) divHtml += `<div class="alert-rsi">RSI(6) en sobreventa (${r.rsi6}) — posible rebote</div>`;
-  if (r.rsi6_overbought) divHtml += `<div class="alert-rsi">RSI(6) en sobrecompra (${r.rsi6}) — posible corrección</div>`;
-
-  // Señales de cierre
-  let closeHtml = '';
-  if (r.close_long?.should_close && (isLong || r.signal === 'NEUTRAL')) {
-    closeHtml += `<div class="close-alert">
-      🔴 Cerrar LONG si tenés (${r.close_long.urgency}): ${r.close_long.reasons.join(', ')}
-    </div>`;
-  }
-  if (r.close_short?.should_close && (isShort || r.signal === 'NEUTRAL')) {
-    closeHtml += `<div class="close-alert">
-      🟢 Cerrar SHORT si tenés (${r.close_short.urgency}): ${r.close_short.reasons.join(', ')}
-    </div>`;
-  }
-
-  // Niveles
   const lvl = r.levels || {};
   const sl  = isLong ? lvl.stop_long  : isShort ? lvl.stop_short  : null;
   const tp1 = isLong ? lvl.tp1_long   : isShort ? lvl.tp1_short   : null;
   const tp2 = isLong ? lvl.tp2_long   : isShort ? lvl.tp2_short   : null;
   const tp3 = isLong ? lvl.tp3_long   : isShort ? lvl.tp3_short   : null;
-  const levelsHtml = sl ? `
-    <div class="levels">
-      <div class="levels-title">Niveles ATR — Perfil medio-agresivo</div>
-      <div class="level-row"><span class="level-sl">🛑 Stop Loss</span><span class="level-sl">$${fmt(sl)}</span></div>
-      <div class="level-row"><span class="level-tp1">🎯 TP1 (cerrar 40%)</span><span class="level-tp1">$${fmt(tp1)}</span></div>
-      <div class="level-row"><span class="level-tp2">🎯 TP2 (cerrar 40%)</span><span class="level-tp2">$${fmt(tp2)}</span></div>
-      <div class="level-row"><span class="level-tp3">🎯 TP3 (dejar correr 20%)</span><span class="level-tp3">$${fmt(tp3)}</span></div>
-      <div class="level-rr">R/R ratio: 1:${lvl.rr_ratio} | ATR: $${fmt(lvl.atr)}</div>
-    </div>` : '';
+  const levelsHtml = sl ? `<div class="levels">
+    <div class="levels-title">Niveles sugeridos (ATR)</div>
+    <div class="level-row"><span class="level-sl">Stop Loss</span><span class="level-sl">$${fmt(sl)}</span></div>
+    <div class="level-row"><span class="level-tp1">TP1 (40%)</span><span class="level-tp1">$${fmt(tp1)}</span></div>
+    <div class="level-row"><span class="level-tp2">TP2 (40%)</span><span class="level-tp2">$${fmt(tp2)}</span></div>
+    <div class="level-row"><span class="level-tp3">TP3 (20%)</span><span class="level-tp3">$${fmt(tp3)}</span></div>
+    <div class="level-rr">R/R: 1:${lvl.rr_ratio}</div>
+  </div>` : '';
 
-  // Pivots
   const p = r.pivots || {};
-  const pivotsHtml = p.pivot != null ? `
-    <div class="pivots">
-      <div class="pivots-title">Soportes y resistencias</div>
-      <div class="pivot-grid">
-        <div class="pivot-item"><span class="pivot-r">R2</span><span class="pivot-r">$${fmt(p.r2)}</span></div>
-        <div class="pivot-item"><span class="pivot-r">R1</span><span class="pivot-r">$${fmt(p.r1)}</span></div>
-        <div class="pivot-item"><span class="pivot-p">Pivot</span><span class="pivot-p">$${fmt(p.pivot)}</span></div>
-        <div class="pivot-item"></div>
-        <div class="pivot-item"><span class="pivot-s">S1</span><span class="pivot-s">$${fmt(p.s1)}</span></div>
-        <div class="pivot-item"><span class="pivot-s">S2</span><span class="pivot-s">$${fmt(p.s2)}</span></div>
-      </div>
-    </div>` : '';
+  const pivotsHtml = p.pivot != null ? `<div class="pivots">
+    <div class="pivots-title">S/R</div>
+    <div class="pivot-grid">
+      <div class="pivot-item"><span class="pivot-r">R2</span><span class="pivot-r">$${fmt(p.r2)}</span></div>
+      <div class="pivot-item"><span class="pivot-r">R1</span><span class="pivot-r">$${fmt(p.r1)}</span></div>
+      <div class="pivot-item"><span class="pivot-p">Pivot</span><span class="pivot-p">$${fmt(p.pivot)}</span></div>
+      <div class="pivot-item"></div>
+      <div class="pivot-item"><span class="pivot-s">S1</span><span class="pivot-s">$${fmt(p.s1)}</span></div>
+      <div class="pivot-item"><span class="pivot-s">S2</span><span class="pivot-s">$${fmt(p.s2)}</span></div>
+    </div>
+  </div>` : '';
 
-  // Conditions
   const condHtml = Object.entries(r.conditions || {}).map(([k,v]) =>
     `<div class="cond-item ${v?'pass':''}"><div class="cond-dot ${v?'dot-pass':'dot-fail'}"></div>${k}</div>`
   ).join('');
 
-  // Reason if NEUTRAL
-  const reasonHtml = r.signal_reason ? `<div class="signal-reason">${r.signal_reason}</div>` : '';
-
   return `<div class="card ${sc}">
     <div class="card-header">
-      <div>
-        <div class="asset-name">${r.name}/USDT</div>
-        <div class="asset-price">$${fmt(r.price)}</div>
-      </div>
+      <div><div class="asset-name">${r.name}/USDT</div><div class="asset-price">$${fmt(r.price)}</div></div>
       <div class="signal-block">
-        <span class="signal-badge ${bc}">${r.signal || 'NEUTRAL'}</span>
+        <span class="signal-badge ${badgeClass(r.signal)}">${r.signal || 'NEUTRAL'}</span>
         ${r.confidence && r.confidence !== '—' ? `<span class="confidence-badge ${confClass(r.confidence)}">${r.confidence}</span>` : ''}
       </div>
     </div>
-    ${reasonHtml}
+    ${r.signal_reason ? `<div class="signal-reason">${r.signal_reason}</div>` : ''}
     ${trendsHtml}
     ${adxHtml}
     <div class="score-section">
-      <div class="score-label">
-        <span>Score ponderado</span>
-        <span>${r.score > 0 ? '+' : ''}${r.score} / ${r.max_score}</span>
-      </div>
+      <div class="score-label"><span>Score</span><span>${r.score > 0 ? '+' : ''}${r.score} / ${r.max_score}</span></div>
       <div class="score-bar"><div class="score-fill ${fc}" style="width:${sw}%"></div></div>
     </div>
     ${warningsHtml}
     ${divHtml}
-    ${closeHtml}
     <div class="indicators">
-      <div class="kpi"><div class="kpi-label">RSI 6</div><div class="kpi-value" style="color:${r.rsi6<30||r.rsi6>70?'#f0b429':'#e6edf3'}">${r.rsi6 ?? '—'}</div></div>
+      <div class="kpi"><div class="kpi-label">RSI 6</div><div class="kpi-value">${r.rsi6 ?? '—'}</div></div>
       <div class="kpi"><div class="kpi-label">RSI 20</div><div class="kpi-value">${r.rsi20 ?? '—'}</div></div>
       <div class="kpi"><div class="kpi-label">MACD hist</div><div class="kpi-value" style="color:${r.macd_hist>0?'#2ea043':'#da3633'}">${r.macd_hist ?? '—'}</div></div>
       <div class="kpi"><div class="kpi-label">EMA 20</div><div class="kpi-value">$${fmt(r.ema20)}</div></div>
       <div class="kpi"><div class="kpi-label">VWAP</div><div class="kpi-value">$${fmt(r.vwap)}</div></div>
-      <div class="kpi"><div class="kpi-label">OBV</div><div class="kpi-value" style="color:${r.obv_trend==='ALCISTA'?'#2ea043':r.obv_trend==='BAJISTA'?'#da3633':'#8b949e'}">${r.obv_trend}</div></div>
+      <div class="kpi"><div class="kpi-label">OBV</div><div class="kpi-value" style="color:${r.obv_trend==='ALCISTA'?'#2ea043':'#da3633'}">${r.obv_trend}</div></div>
     </div>
     ${levelsHtml}
     ${pivotsHtml}
-    <div class="conditions"><div class="cond-title">Condiciones evaluadas</div>${condHtml}</div>
+    <div class="conditions"><div class="cond-title">Condiciones</div>${condHtml}</div>
   </div>`;
 }
-
-// ── Load Data ────────────────────────────────────────────────────────────────
 
 async function loadData() {
   try {
     const r = await fetch('/api/data');
     const data = await r.json();
-    document.getElementById('last-update').textContent = 'Última actualización: ' + (data.last_update || '—');
-    document.getElementById('grid').innerHTML = (data.results || []).length
-      ? data.results.map(renderCard).join('')
+    marketData = data.results || [];
+    document.getElementById('last-update').textContent = 'Actualizado: ' + (data.last_update || '—');
+    document.getElementById('grid').innerHTML = marketData.length
+      ? marketData.map(renderCard).join('')
       : '<div class="loading">Sin datos</div>';
   } catch(e) {
-    document.getElementById('grid').innerHTML = '<div class="loading">Error al cargar datos</div>';
+    document.getElementById('grid').innerHTML = '<div class="loading">Error</div>';
   }
 }
 
-// ── Acertividad ──────────────────────────────────────────────────────────────
+// ── Operaciones ──────────────────────────────────────────────────────────────
 
-async function loadStats() {
-  const el = document.getElementById('stats-grid');
-  el.innerHTML = '<div class="loading">Calculando...</div>';
+async function loadOperations() {
   try {
-    const r = await fetch('/api/stats');
-    const stats = await r.json();
-    if (!stats.length) { el.innerHTML = '<div class="no-data">Sin señales registradas todavía.</div>'; return; }
-    el.innerHTML = stats.map(renderStatCard).join('');
-  } catch(e) { el.innerHTML = '<div class="loading">Error al cargar</div>'; }
+    const [openR, closedR, summaryR] = await Promise.all([
+      fetch('/api/operations/open'),
+      fetch('/api/operations/closed'),
+      fetch('/api/operations/summary'),
+    ]);
+    const open    = await openR.json();
+    const closed  = await closedR.json();
+    const summary = await summaryR.json();
+    renderOpsSummary(summary);
+    renderOpenOps(open);
+    renderClosedOps(closed);
+  } catch(e) {
+    console.error('Error ops:', e);
+  }
 }
 
-function wrClass(rate) { return rate >= 60 ? 'wr-good' : rate >= 45 ? 'wr-neutral' : 'wr-bad'; }
-
-function renderStatCard(s) {
-  function wrBox(label, data) {
-    if (!data) return `<div class="wr-box"><div class="wr-label">${label}</div><div class="wr-value wr-neutral">—</div><div class="wr-sub">Sin datos</div></div>`;
-    return `<div class="wr-box"><div class="wr-label">${label}</div><div class="wr-value ${wrClass(data.rate)}">${data.rate}%</div><div class="wr-sub">${data.wins}/${data.total} | avg ${data.avg_pct}%</div></div>`;
-  }
-  const recentHtml = s.recent.map(r => {
-    const dir = r.signal?.includes('LONG') ? 'L' : r.signal?.includes('SHORT') ? 'S' : 'N';
-    const dirColor = dir === 'L' ? '#2ea043' : dir === 'S' ? '#da3633' : '#8b949e';
-    const dot = (win) => win == null ? `<div class="res-dot res-pending">?</div>` : win ? `<div class="res-dot res-win">W</div>` : `<div class="res-dot res-loss">L</div>`;
-    const date = r.created_at ? r.created_at.substring(0,16).replace('T',' ') : '—';
-    return `<div class="signal-row">
-      <div><span style="color:${dirColor};font-weight:700">${dir}</span> $${fmt(r.price_entry)} <span class="sig-date">${date}</span></div>
-      <div class="sig-result">${dot(r.win_4h)}<span style="font-size:0.62rem;color:#8b949e">4H</span>${dot(r.win_24h)}<span style="font-size:0.62rem;color:#8b949e">24H</span>${dot(r.win_72h)}<span style="font-size:0.62rem;color:#8b949e">72H</span></div>
-    </div>`;
-  }).join('');
-  return `<div class="stat-card">
-    <div class="stat-asset">${s.asset} — ${s.total_signals} señales totales</div>
-    <div class="win-rates">${wrBox('4 horas', s.win_4h)}${wrBox('24 horas', s.win_24h)}${wrBox('72 horas', s.win_72h)}</div>
-    <div class="recent-title">Últimas señales</div>
-    ${recentHtml || '<div style="color:#8b949e;font-size:0.8rem">Sin señales aún</div>'}
+function renderOpsSummary(s) {
+  const pnlClass = s.total_pnl > 0 ? 'pnl-pos' : s.total_pnl < 0 ? 'pnl-neg' : '';
+  document.getElementById('ops-summary').innerHTML = `<div class="ops-summary">
+    <div class="summary-card">
+      <div class="summary-label">Operaciones totales</div>
+      <div class="summary-value">${s.total}</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-label">Win Rate</div>
+      <div class="summary-value" style="color:${s.win_rate>=50?'#2ea043':'#da3633'}">${s.win_rate}%</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-label">PnL acumulado</div>
+      <div class="summary-value ${pnlClass}">$${fmt(s.total_pnl)}</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-label">Avg Win / Loss</div>
+      <div class="summary-value" style="font-size:1rem">
+        <span class="pnl-pos">+${s.avg_win_pct}%</span> / <span class="pnl-neg">${s.avg_loss_pct}%</span>
+      </div>
+    </div>
   </div>`;
 }
 
-// ── Historial ────────────────────────────────────────────────────────────────
+function renderOpenOps(ops) {
+  if (!ops.length) {
+    document.getElementById('ops-open').innerHTML = '<div class="empty-state">No tenés operaciones abiertas. Hacé click en "+ Nueva operación" para empezar.</div>';
+    return;
+  }
+  document.getElementById('ops-open').innerHTML = ops.map(renderOpCard).join('');
+}
+
+function renderOpCard(op) {
+  const dirClass = op.direction === 'LONG' ? 'long' : 'short';
+  const dirColor = op.direction === 'LONG' ? 'op-direction-long' : 'op-direction-short';
+  const pnlClass = op.pnl_pct > 0 ? 'pnl-pos' : op.pnl_pct < 0 ? 'pnl-neg' : '';
+
+  // Niveles con estado
+  function levelItem(label, price, dist, reached, isStop) {
+    if (!price) return '';
+    let cls = 'level-item';
+    if (reached) cls += ' reached';
+    else if (isStop && Math.abs(dist) < 1.5) cls += ' danger';
+    return `<div class="${cls}">
+      <div class="level-item-label">${label}</div>
+      <div class="level-item-price">$${fmt(price)}</div>
+      <div class="level-item-dist">${dist > 0 ? '+' : ''}${dist}%</div>
+    </div>`;
+  }
+
+  const levelsHtml = `<div class="levels-progress">
+    ${levelItem('Stop', op.stop_loss, op.dist_stop, op.stop_hit, true)}
+    ${levelItem('TP1', op.tp1, op.dist_tp1, op.tp1_reached)}
+    ${levelItem('TP2', op.tp2, op.dist_tp2, op.tp2_reached)}
+    ${levelItem('TP3', op.tp3, op.dist_tp3, op.tp3_reached)}
+  </div>`;
+
+  // Alertas
+  let alerts = '';
+  if (op.tp1_reached && !op.tp2_reached) alerts += `<div class="op-alert op-alert-info">TP1 alcanzado — considerar cerrar 40%</div>`;
+  if (op.tp2_reached && !op.tp3_reached) alerts += `<div class="op-alert op-alert-info">TP2 alcanzado — considerar cerrar otro 40%</div>`;
+  if (op.tp3_reached) alerts += `<div class="op-alert op-alert-info">TP3 alcanzado — objetivo completo</div>`;
+  if (op.stop_close && !op.stop_hit) alerts += `<div class="op-alert op-alert-warn">Stop Loss cercano (${op.dist_stop}%)</div>`;
+  if (op.stop_hit) alerts += `<div class="op-alert op-alert-danger">Stop Loss alcanzado — cerrar inmediato</div>`;
+  if (op.bot_changed_against) alerts += `<div class="op-alert op-alert-warn">Bot cambió a ${op.bot_current_signal} — contra tu posición</div>`;
+  if (op.close_signal?.should_close) {
+    const u = op.close_signal.urgency;
+    const cls = u === 'ALTA' ? 'op-alert-danger' : 'op-alert-warn';
+    alerts += `<div class="op-alert ${cls}">Cierre sugerido (${u}): ${op.close_signal.reasons.join(', ')}</div>`;
+  }
+
+  return `<div class="op-card ${dirClass}">
+    <div class="op-header">
+      <div class="op-title">
+        <span>${op.asset}/USDT</span>
+        <span class="${dirColor}">${op.direction}</span>
+        <span class="op-leverage">${op.leverage}x</span>
+      </div>
+      <div class="op-pnl ${pnlClass}">${op.pnl_pct > 0 ? '+' : ''}${op.pnl_pct}% ($${fmt(op.pnl_usd)})</div>
+    </div>
+
+    <div class="op-grid">
+      <div class="op-field"><div class="op-field-label">Entrada</div><div class="op-field-value">$${fmt(op.entry_price)}</div></div>
+      <div class="op-field"><div class="op-field-label">Actual</div><div class="op-field-value">$${fmt(op.current_price)}</div></div>
+      <div class="op-field"><div class="op-field-label">Equilibrio</div><div class="op-field-value">$${fmt(op.breakeven)}</div></div>
+      <div class="op-field"><div class="op-field-label">Liquidación</div><div class="op-field-value" style="color:#da3633">$${fmt(op.liquidation)}</div></div>
+      <div class="op-field"><div class="op-field-label">Tamaño</div><div class="op-field-value">${fmt(op.size_units)} ${op.asset}</div></div>
+      <div class="op-field"><div class="op-field-label">Margen</div><div class="op-field-value">$${fmt(op.margin_usd)}</div></div>
+      <div class="op-field"><div class="op-field-label">Tiempo</div><div class="op-field-value">${op.elapsed}</div></div>
+      <div class="op-field"><div class="op-field-label">R/R actual</div><div class="op-field-value ${op.rr_realized>0?'pnl-pos':op.rr_realized<0?'pnl-neg':''}">${op.rr_realized ?? '—'}</div></div>
+    </div>
+
+    ${levelsHtml}
+
+    <div class="op-alerts">${alerts}</div>
+
+    <div style="font-size:0.72rem;color:#8b949e;margin-bottom:8px">
+      Bot al abrir: <strong>${op.bot_signal_at_open || '—'}</strong> (score ${op.bot_score_at_open}, ${op.bot_confidence_at_open})
+      → Actual: <strong style="color:${op.bot_changed_against?'#da3633':'#2ea043'}">${op.bot_current_signal}</strong> (score ${op.bot_current_score}, ${op.bot_current_confidence})
+    </div>
+
+    ${op.notes ? `<div style="font-size:0.75rem;color:#8b949e;font-style:italic;margin-bottom:8px">Notas: ${op.notes}</div>` : ''}
+
+    <div class="op-actions">
+      <button class="btn btn-danger" onclick="openCloseModal(${op.id}, ${op.current_price})">Cerrar operación</button>
+    </div>
+  </div>`;
+}
+
+function renderClosedOps(ops) {
+  if (!ops.length) {
+    document.getElementById('ops-closed').innerHTML = '<div class="empty-state" style="padding:20px">Sin operaciones cerradas todavía</div>';
+    return;
+  }
+  document.getElementById('ops-closed').innerHTML = ops.map(op => {
+    const dirColor = op.direction === 'LONG' ? '#2ea043' : '#da3633';
+    const pnlClass = op.pnl_pct > 0 ? 'pnl-pos' : 'pnl-neg';
+    const opened = op.opened_at?.substring(0,16).replace('T',' ') || '—';
+    const closed = op.closed_at?.substring(0,16).replace('T',' ') || '—';
+    return `<div class="signal-row" style="background:#161b22;padding:10px;border-radius:8px;margin-bottom:6px;gap:8px;flex-wrap:wrap">
+      <span style="font-weight:700;width:50px">${op.asset}</span>
+      <span style="color:${dirColor};width:60px">${op.direction}</span>
+      <span style="width:100px;font-size:0.75rem">$${fmt(op.entry_price)} → $${fmt(op.exit_price)}</span>
+      <span class="${pnlClass}" style="font-weight:700;width:90px">${op.pnl_pct > 0 ? '+' : ''}${op.pnl_pct}%</span>
+      <span class="${pnlClass}" style="width:80px">$${fmt(op.pnl_usd)}</span>
+      <span style="color:#8b949e;font-size:0.7rem;flex:1">${opened} → ${closed}</span>
+      <span style="color:#8b949e;font-size:0.7rem">${op.exit_reason}</span>
+    </div>`;
+  }).join('');
+}
+
+// ── Modales ──────────────────────────────────────────────────────────────────
+
+function openModal(id) { document.getElementById(id).classList.add('show'); }
+function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+
+function openNewOp() {
+  openModal('modal-new');
+  suggestLevels();
+}
+
+function getMarketFor(asset) {
+  return marketData.find(m => m.name === asset);
+}
+
+function suggestLevels() {
+  const asset = document.getElementById('op-asset').value;
+  const dir   = document.getElementById('op-direction').value;
+  const m = getMarketFor(asset);
+  if (!m) return;
+  document.getElementById('op-entry').value = m.price;
+  document.getElementById('op-current-price').textContent = `Precio actual: $${fmt(m.price)}`;
+
+  const lvl = m.levels || {};
+  if (dir === 'LONG') {
+    document.getElementById('op-stop').value = lvl.stop_long;
+    document.getElementById('op-tp1').value = lvl.tp1_long;
+    document.getElementById('op-tp2').value = lvl.tp2_long;
+    document.getElementById('op-tp3').value = lvl.tp3_long;
+  } else {
+    document.getElementById('op-stop').value = lvl.stop_short;
+    document.getElementById('op-tp1').value = lvl.tp1_short;
+    document.getElementById('op-tp2').value = lvl.tp2_short;
+    document.getElementById('op-tp3').value = lvl.tp3_short;
+  }
+  recalcSize();
+}
+
+function recalcSize() {
+  const capital  = parseFloat(document.getElementById('op-capital').value) || 10000;
+  const entry    = parseFloat(document.getElementById('op-entry').value) || 0;
+  const stop     = parseFloat(document.getElementById('op-stop').value) || 0;
+  const leverage = parseInt(document.getElementById('op-leverage').value) || 1;
+  const riskPct  = 0.025;
+
+  if (!entry || !stop) return;
+
+  const riskAmount    = capital * riskPct;
+  const stopDistance  = Math.abs(entry - stop) / entry;
+  const positionSize  = riskAmount / stopDistance;
+  const units         = positionSize / entry;
+  const margin        = positionSize / leverage;
+
+  document.getElementById('op-size').value = units.toFixed(4);
+  document.getElementById('op-size-info').textContent =
+    `~$${positionSize.toFixed(0)} | margen: $${margin.toFixed(0)} | riesgo: $${riskAmount.toFixed(0)} (${(riskPct*100).toFixed(1)}%)`;
+}
+
+async function submitNewOp() {
+  const asset = document.getElementById('op-asset').value;
+  const m = getMarketFor(asset);
+  const data = {
+    asset: asset,
+    direction: document.getElementById('op-direction').value,
+    entry_price: parseFloat(document.getElementById('op-entry').value),
+    size_units:  parseFloat(document.getElementById('op-size').value),
+    leverage:    parseInt(document.getElementById('op-leverage').value),
+    margin_mode: document.getElementById('op-margin').value,
+    stop_loss:   parseFloat(document.getElementById('op-stop').value) || null,
+    tp1:         parseFloat(document.getElementById('op-tp1').value) || null,
+    tp2:         parseFloat(document.getElementById('op-tp2').value) || null,
+    tp3:         parseFloat(document.getElementById('op-tp3').value) || null,
+    notes:       document.getElementById('op-notes').value,
+    bot_signal:     m?.signal || '',
+    bot_score:      m?.score || 0,
+    bot_confidence: m?.confidence || '',
+  };
+
+  const r = await fetch('/api/operations/create', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data),
+  });
+  const res = await r.json();
+  if (res.ok) {
+    closeModal('modal-new');
+    loadOperations();
+  } else {
+    alert('Error: ' + res.error);
+  }
+}
+
+function openCloseModal(opId, currentPrice) {
+  closingOpId = opId;
+  document.getElementById('close-price').value = currentPrice;
+  openModal('modal-close');
+}
+
+async function submitCloseOp() {
+  const data = {
+    exit_price: parseFloat(document.getElementById('close-price').value),
+    reason: document.getElementById('close-reason').value,
+  };
+  const r = await fetch(`/api/operations/${closingOpId}/close`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data),
+  });
+  const res = await r.json();
+  if (res.ok) {
+    closeModal('modal-close');
+    loadOperations();
+  } else {
+    alert('Error: ' + res.error);
+  }
+}
+
+// ── Stats y history ──────────────────────────────────────────────────────────
+
+async function loadStats() {
+  const el = document.getElementById('stats-grid');
+  el.innerHTML = '<div class="loading">Cargando...</div>';
+  try {
+    const r = await fetch('/api/stats');
+    const stats = await r.json();
+    if (!stats.length) { el.innerHTML = '<div class="empty-state">Sin señales registradas todavía.</div>'; return; }
+    el.innerHTML = stats.map(s => {
+      function wrBox(label, d) {
+        if (!d) return `<div class="wr-box"><div class="wr-label">${label}</div><div class="wr-value wr-neutral">—</div><div class="wr-sub">Sin datos</div></div>`;
+        const cls = d.rate >= 60 ? 'wr-good' : d.rate >= 45 ? 'wr-neutral' : 'wr-bad';
+        return `<div class="wr-box"><div class="wr-label">${label}</div><div class="wr-value ${cls}">${d.rate}%</div><div class="wr-sub">${d.wins}/${d.total} | ${d.avg_pct}%</div></div>`;
+      }
+      const recent = s.recent.map(r => {
+        const dir = r.signal?.includes('LONG') ? 'L' : r.signal?.includes('SHORT') ? 'S' : 'N';
+        const dot = (w) => w == null ? '<div class="res-dot res-pending">?</div>' : w ? '<div class="res-dot res-win">W</div>' : '<div class="res-dot res-loss">L</div>';
+        const date = r.created_at?.substring(0,16).replace('T',' ') || '—';
+        return `<div class="signal-row"><div><strong>${dir}</strong> $${fmt(r.price_entry)} <span class="sig-date">${date}</span></div><div>${dot(r.win_4h)}${dot(r.win_24h)}${dot(r.win_72h)}</div></div>`;
+      }).join('');
+      return `<div class="stat-card">
+        <div class="stat-asset">${s.asset} — ${s.total_signals} señales</div>
+        <div class="win-rates">${wrBox('4H', s.win_4h)}${wrBox('24H', s.win_24h)}${wrBox('72H', s.win_72h)}</div>
+        <div class="recent-title">Últimas</div>${recent}
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = '<div class="loading">Error</div>'; }
+}
 
 async function loadHistory() {
   const el = document.getElementById('history-table');
@@ -386,40 +785,35 @@ async function loadHistory() {
   try {
     const r = await fetch('/api/signals');
     const signals = await r.json();
-    if (!signals.length) { el.innerHTML = '<div class="no-data">Sin señales registradas todavía.</div>'; return; }
-    const rows = signals.map(s => {
+    if (!signals.length) { el.innerHTML = '<div class="empty-state">Sin señales todavía.</div>'; return; }
+    el.innerHTML = `<div class="card" style="overflow-x:auto">` + signals.map(s => {
       const dir = s.signal?.includes('LONG') ? 'LONG' : s.signal?.includes('SHORT') ? 'SHORT' : 'NEUTRAL';
       const dirColor = dir === 'LONG' ? '#2ea043' : dir === 'SHORT' ? '#da3633' : '#8b949e';
-      const dot = (win, pct) => {
-        if (win == null) return '<span style="color:#8b949e">?</span>';
-        const sign = pct > 0 ? '+' : '';
-        return `<span style="color:${win?'#2ea043':'#da3633'}">${win?'W':'L'} ${sign}${pct}%</span>`;
-      };
-      const date = s.created_at ? s.created_at.substring(0,16).replace('T',' ') : '—';
+      const dot = (w, p) => w == null ? '<span style="color:#8b949e">?</span>' : `<span style="color:${w?'#2ea043':'#da3633'}">${w?'W':'L'} ${p>0?'+':''}${p}%</span>`;
+      const date = s.created_at?.substring(0,16).replace('T',' ') || '—';
       return `<div class="signal-row" style="gap:12px">
-        <span style="color:#8b949e;width:130px;flex-shrink:0">${date}</span>
+        <span style="color:#8b949e;width:130px">${date}</span>
         <span style="font-weight:700;width:40px">${s.asset}</span>
         <span style="color:${dirColor};width:60px">${dir}</span>
         <span style="width:90px">$${fmt(s.price_entry)}</span>
-        <span style="width:80px">${dot(s.win_4h, s.pct_4h)} 4H</span>
-        <span style="width:80px">${dot(s.win_24h, s.pct_24h)} 24H</span>
+        <span style="width:90px">${dot(s.win_4h, s.pct_4h)} 4H</span>
+        <span style="width:90px">${dot(s.win_24h, s.pct_24h)} 24H</span>
         <span>${dot(s.win_72h, s.pct_72h)} 72H</span>
       </div>`;
-    }).join('');
-    el.innerHTML = `<div class="card" style="overflow-x:auto">${rows}</div>`;
-  } catch(e) { el.innerHTML = '<div class="loading">Error al cargar</div>'; }
+    }).join('') + '</div>';
+  } catch(e) { el.innerHTML = '<div class="loading">Error</div>'; }
 }
 
 async function forceRefresh() {
   document.getElementById('grid').innerHTML = '<div class="loading">Actualizando...</div>';
   await fetch('/api/refresh');
   await loadData();
-  if (currentTab === 'stats') loadStats();
-  if (currentTab === 'history') loadHistory();
+  if (currentTab === 'ops') loadOperations();
 }
 
 loadData();
-setInterval(loadData, 5 * 60 * 1000);
+setInterval(loadData, 2 * 60 * 1000);  // cada 2 min en lugar de 5
+setInterval(() => { if (currentTab === 'ops') loadOperations(); }, 30 * 1000);  // ops cada 30s
 </script>
 </body>
 </html>
