@@ -28,10 +28,19 @@ def refresh_data():
     print(f"\n[{datetime.utcnow().strftime('%H:%M UTC')}] Actualizando datos...")
     results = run_analysis()
 
-    # Guardar en cache
+    # Guardar en cache — sanitizar tipos numpy/bool
+    def sanitize(obj):
+        if isinstance(obj, dict):
+            return {k: sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [sanitize(i) for i in obj]
+        if hasattr(obj, "item"):
+            return obj.item()
+        return obj
+
     CACHE_PATH.parent.mkdir(exist_ok=True)
     with open(CACHE_PATH, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(sanitize(results), f, indent=2)
 
     # Notificar por Telegram si hay señales
     for r in results:
