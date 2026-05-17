@@ -7,9 +7,6 @@ import requests
 import json
 from pathlib import Path
 
-# ── Configuración ────────────────────────────────────────────────────────────
-# Estos valores los completás con tus datos reales en config.json
-
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
 
@@ -27,26 +24,25 @@ def send_message(text: str) -> bool:
     chat_id = cfg.get("telegram_chat_id", "")
 
     if not token or not chat_id:
-        print("⚠️  Telegram no configurado (falta config.json)")
+        print("Telegram no configurado (falta config.json)")
         return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "HTML",
     }
     try:
         resp = requests.post(url, json=payload, timeout=10)
         resp.raise_for_status()
         return True
     except Exception as e:
-        print(f"❌ Error Telegram: {e}")
+        print(f"Error Telegram: {e}")
         return False
 
 
 def format_signal_message(result: dict) -> str:
-    """Formatea el mensaje de señal para Telegram."""
+    """Formatea el mensaje de señal para Telegram — sin emojis ni HTML."""
     signal = result["signal"]
     name = result["name"]
     price = result["price"]
@@ -55,49 +51,52 @@ def format_signal_message(result: dict) -> str:
     trend = result["trend_1d"]
     levels = result["levels"]
 
-    # Emoji según señal
-    if "LONG" in signal:
-        emoji = "🟢"
+    is_long  = "LONG" in signal
+    is_short = "SHORT" in signal
+
+    if is_long:
         sl = levels["stop_long"]
         tp1 = levels["tp1_long"]
         tp2 = levels["tp2_long"]
-    elif "SHORT" in signal:
-        emoji = "🔴"
+        direccion = "LONG"
+    elif is_short:
         sl = levels["stop_short"]
         tp1 = levels["tp1_short"]
         tp2 = levels["tp2_short"]
+        direccion = "SHORT"
     else:
-        emoji = "⚪"
         sl = tp1 = tp2 = None
+        direccion = "NEUTRAL"
 
     lines = [
-        f"{emoji} <b>SEÑAL {signal} — {name}/USDT</b>",
+        f"=== SENAL {direccion} - {name}/USDT ===",
         f"Score: {score}/{max_s} | Precio: ${price:,}",
         f"Tendencia 1D: {trend}",
+        f"RSI(6): {result['rsi6']} | RSI(20): {result['rsi20']}",
+        f"MACD hist: {result['macd_hist']}",
         "",
-        "<b>Condiciones activas:</b>",
+        "Condiciones:",
     ]
 
     for cond, val in result["conditions"].items():
-        icon = "✅" if val else "❌"
-        lines.append(f"{icon} {cond}")
+        estado = "SI" if val else "NO"
+        lines.append(f"  [{estado}] {cond}")
 
-    lines.append("")
-    lines.append(f"RSI(6): {result['rsi6']} | RSI(20): {result['rsi20']}")
-
-    if result["rsi6_oversold"]:
-        lines.append("⚠️ RSI(6) en sobreventa — posible rebote técnico")
-    if result["rsi6_overbought"]:
-        lines.append("⚠️ RSI(6) en sobrecompra — posible corrección")
+    if result.get("rsi6_oversold"):
+        lines.append("")
+        lines.append("AVISO: RSI(6) en sobreventa - posible rebote")
+    if result.get("rsi6_overbought"):
+        lines.append("")
+        lines.append("AVISO: RSI(6) en sobrecompra - posible correccion")
 
     if sl:
         lines.append("")
-        lines.append(f"🛑 Stop Loss: ${sl:,}")
-        lines.append(f"🎯 TP1: ${tp1:,}")
-        lines.append(f"🎯 TP2: ${tp2:,}")
+        lines.append(f"Stop Loss: ${sl:,}")
+        lines.append(f"TP1: ${tp1:,}")
+        lines.append(f"TP2: ${tp2:,}")
 
     lines.append("")
-    lines.append(f"🕐 {result['updated_at']}")
+    lines.append(result.get("updated_at", ""))
 
     return "\n".join(lines)
 
@@ -105,7 +104,6 @@ def format_signal_message(result: dict) -> str:
 def notify_if_signal(result: dict, last_signals: dict) -> dict:
     """
     Envía alerta solo si la señal cambió respecto a la última vez.
-    Evita spam de mensajes repetidos.
     """
     if result.get("error"):
         return last_signals
@@ -114,7 +112,6 @@ def notify_if_signal(result: dict, last_signals: dict) -> dict:
     signal = result["signal"]
     prev_signal = last_signals.get(name, "")
 
-    # Solo notifica si la señal es LONG o SHORT Y cambió
     is_actionable = "LONG" in signal or "SHORT" in signal
     changed = signal != prev_signal
 
@@ -122,7 +119,7 @@ def notify_if_signal(result: dict, last_signals: dict) -> dict:
         msg = format_signal_message(result)
         sent = send_message(msg)
         if sent:
-            print(f"  📱 Telegram enviado: {name} → {signal}")
+            print(f"  Telegram enviado: {name} -> {signal}")
         last_signals[name] = signal
 
     return last_signals
