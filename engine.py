@@ -32,9 +32,9 @@ KRAKEN_INTERVALS = {"1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
 
 # Score maximo teorico real (suma de todos los pesos positivos)
 # EMA: 3 | Bollinger MB: 1 | VWAP: 1 | MACD: 2 | StochRSI: 1 |
-# RSI20: 1 | Divergencia: 3 | OBV: 1 | Volumen: 1 = 14
-MAX_SCORE = 14
-SIGNAL_THRESHOLD = 8  # mas estricto que antes para reducir falsos positivos
+# RSI20: 1 | Divergencia RSI: 3 | OBV: 1 | Divergencia OBV: 2 | Volumen: 1 = 16
+MAX_SCORE = 16
+SIGNAL_THRESHOLD = 9  # ajustado proporcionalmente al nuevo max
 
 
 # ── Fetch de velas ────────────────────────────────────────────────────────────
@@ -200,6 +200,62 @@ def detect_rsi_divergence(df: pd.DataFrame, lookback: int = 30) -> dict:
     return {"bullish": bool(bullish), "bearish": bool(bearish)}
 
 
+# ── Divergencias OBV (precio vs volumen acumulado) ───────────────────────────
+
+def detect_obv_divergence(df: pd.DataFrame, lookback: int = 30) -> dict:
+    """
+    Detecta divergencias entre precio y OBV.
+
+    Divergencia alcista OBV: precio hace minimo mas bajo, OBV hace minimo mas alto
+      → grandes manos compran mientras retail vende = posible reversion alcista
+
+    Divergencia bajista OBV: precio hace maximo mas alto, OBV hace maximo mas bajo
+      → grandes manos venden mientras retail compra = posible reversion bajista
+
+    Mas confiable que divergencia RSI porque mide presion REAL de volumen,
+    no solo momentum del precio.
+    """
+    if len(df) < lookback + 2 or "OBV" not in df.columns:
+        return {"bullish": False, "bearish": False}
+
+    recent = df.tail(lookback).dropna(subset=["OBV"])
+    if len(recent) < 10:
+        return {"bullish": False, "bearish": False}
+
+    mid = len(recent) // 2
+    first_half  = recent.iloc[:mid]
+    second_half = recent.iloc[mid:]
+
+    # ── Divergencia alcista ──────────────────────────────────────────────────
+    p_low_idx_1 = first_half["close"].idxmin()
+    p_low_idx_2 = second_half["close"].idxmin()
+    p_low_1 = first_half.loc[p_low_idx_1, "close"]
+    p_low_2 = second_half.loc[p_low_idx_2, "close"]
+    obv_low_1 = first_half.loc[p_low_idx_1, "OBV"]
+    obv_low_2 = second_half.loc[p_low_idx_2, "OBV"]
+
+    # Margen de 0.5% para precio (significativo) y OBV creciendo (acumulacion)
+    bullish = (
+        p_low_2 < p_low_1 * 0.995
+        and obv_low_2 > obv_low_1
+    )
+
+    # ── Divergencia bajista ──────────────────────────────────────────────────
+    p_high_idx_1 = first_half["close"].idxmax()
+    p_high_idx_2 = second_half["close"].idxmax()
+    p_high_1 = first_half.loc[p_high_idx_1, "close"]
+    p_high_2 = second_half.loc[p_high_idx_2, "close"]
+    obv_high_1 = first_half.loc[p_high_idx_1, "OBV"]
+    obv_high_2 = second_half.loc[p_high_idx_2, "OBV"]
+
+    bearish = (
+        p_high_2 > p_high_1 * 1.005
+        and obv_high_2 < obv_high_1
+    )
+
+    return {"bullish": bool(bullish), "bearish": bool(bearish)}
+
+
 # ── Pivots classicos (sobre vela anterior) ───────────────────────────────────
 
 def calculate_pivots(df: pd.DataFrame) -> dict:
@@ -245,7 +301,9 @@ def calculate_score(df: pd.DataFrame) -> dict:
         return {"score": 0, "max_score": MAX_SCORE, "conditions": {},
                 "market_trending": False, "adx": None, "di_pos": None, "di_neg": None,
                 "rsi6_oversold": False, "rsi6_overbought": False,
-                "bb_squeeze": False, "divergence": {"bullish": False, "bearish": False},
+                "bb_squeeze": False,
+                "divergence": {"bullish": False, "bearish": False},
+                "obv_divergence": {"bullish": False, "bearish": False},
                 "warnings": ["Datos insuficientes"]}
 
     row      = df.iloc[-2]   # ultima vela CERRADA
@@ -337,7 +395,7 @@ def calculate_score(df: pd.DataFrame) -> dict:
     elif div["bearish"]:
         score -= 3
 
-    # ── CAPA 3: VOLUMEN (max 2 puntos) ────────────────────────────────────────
+    # ── CAPA 3: VOLUMEN (max 4 puntos) ────────────────────────────────────────
 
     # OBV vs MA20 — 1 punto
     obv_bull = False
@@ -345,6 +403,15 @@ def calculate_score(df: pd.DataFrame) -> dict:
         obv_bull = row["OBV"] > row["OBV_MA20"]
     conditions["OBV > MA20 (presion compradora)"] = obv_bull
     score += 1 if obv_bull else -1
+
+    # Divergencias OBV — 2 puntos (mas confiable que RSI por usar volumen real)
+    obv_div = detect_obv_divergence(df)
+    conditions["Divergencia OBV alcista (acumulacion)"] = obv_div["bullish"]
+    conditions["Divergencia OBV bajista (distribucion)"] = obv_div["bearish"]
+    if obv_div["bullish"]:
+        score += 2
+    elif obv_div["bearish"]:
+        score -= 2
 
     # Volumen fuerte — 1 punto (solo premia, no penaliza)
     vol_strong = False
@@ -369,6 +436,7 @@ def calculate_score(df: pd.DataFrame) -> dict:
         "rsi6_overbought": rsi6_overbought,
         "bb_squeeze": bool(bb_squeeze),
         "divergence": div,
+        "obv_divergence": obv_div,
         "warnings": warnings,
     }
 
@@ -598,6 +666,7 @@ def analyze(name: str, symbol: str) -> dict:
             "di_neg": score_data["di_neg"],
             "conditions": score_data["conditions"],
             "divergence": score_data["divergence"],
+            "obv_divergence": score_data["obv_divergence"],
             "bb_squeeze": score_data["bb_squeeze"],
             "warnings": score_data["warnings"],
             "rsi6":  round(float(last["RSI6"]), 1)  if pd.notna(last["RSI6"])  else None,

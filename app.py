@@ -1,43 +1,95 @@
 """
-Dashboard web — Flask
-Con tracking de señales y métricas de acertividad
+Dashboard web v2.1 con gestion de operaciones
 """
 
 import json
 import numpy as np
-from flask import Flask, render_template, Response
+from flask import Flask, render_template, Response, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from engine import run_analysis
 from telegram_bot import notify_if_signal, format_signal_message, send_message
 from tracker import save_signal, update_outcomes, get_stats, get_all_signals
+from operations import (
+    create_operation, close_operation, update_levels,
+    get_open_operations, get_closed_operations,
+    enrich_open_with_market, get_summary_stats
+)
 from pathlib import Path
 from datetime import datetime
 
 app = Flask(__name__)
 
+CONFIG_PATH = Path(__file__).parent / "config.json"
+CACHE_PATH  = Path(__file__).parent / "data" / "last_results.json"
+
 state = {
     "results": [],
     "last_update": None,
     "last_signals": {},
+    "operation_alerts_sent": {},  # tracking de alertas ya enviadas por operacion
 }
 
-CACHE_PATH = Path(__file__).parent / "data" / "last_results.json"
+
+def load_config():
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    return {}
 
 
 def sanitize(obj):
-    if isinstance(obj, dict):
-        return {k: sanitize(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [sanitize(i) for i in obj]
-    if isinstance(obj, (bool, np.bool_)):
-        return bool(obj)
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if hasattr(obj, 'item'):
-        return obj.item()
+    if isinstance(obj, dict):  return {k: sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):  return [sanitize(i) for i in obj]
+    if isinstance(obj, (bool, np.bool_)): return bool(obj)
+    if isinstance(obj, (np.integer,)): return int(obj)
+    if isinstance(obj, (np.floating,)): return float(obj)
+    if hasattr(obj, 'item'): return obj.item()
     return obj
+
+
+def check_operation_alerts(operations: list):
+    """Envia alertas Telegram para operaciones abiertas."""
+    for op in operations:
+        op_id = op["id"]
+        sent = state["operation_alerts_sent"].setdefault(op_id, set())
+
+        # Stop cercano (1.5%)
+        if op["stop_close"] and "stop_warn" not in sent:
+            msg = (f"AVISO: {op['asset']} {op['direction']}\n"
+                   f"Stop Loss cercano ({op['dist_stop']}%)\n"
+                   f"Precio: ${op['current_price']} | Stop: ${op['stop_loss']}\n"
+                   f"PnL actual: {op['pnl_pct']}%")
+            send_message(msg)
+            sent.add("stop_warn")
+
+        # TPs alcanzados
+        for level in ["tp1", "tp2", "tp3"]:
+            key = f"{level}_reached"
+            if op.get(key) and level not in sent:
+                msg = (f"TP {level.upper()} ALCANZADO: {op['asset']} {op['direction']}\n"
+                       f"Precio: ${op['current_price']} | {level.upper()}: ${op[level]}\n"
+                       f"PnL: {op['pnl_pct']}% (${op['pnl_usd']})\n"
+                       f"Cerrar parcial recomendado")
+                send_message(msg)
+                sent.add(level)
+
+        # Bot cambio contra la posicion
+        if op["bot_changed_against"] and "bot_against" not in sent:
+            msg = (f"AVISO: {op['asset']} {op['direction']}\n"
+                   f"Bot cambio a {op['bot_current_signal']} - contra tu posicion\n"
+                   f"Score: {op['bot_current_score']} | Confianza: {op['bot_current_confidence']}\n"
+                   f"PnL actual: {op['pnl_pct']}%")
+            send_message(msg)
+            sent.add("bot_against")
+
+        # Señal de cierre con alta urgencia
+        cs = op.get("close_signal") or {}
+        if cs.get("urgency") == "ALTA" and "close_high" not in sent:
+            msg = (f"CERRAR {op['asset']} {op['direction']} (URGENCIA ALTA)\n"
+                   f"Razones: {', '.join(cs.get('reasons', []))}\n"
+                   f"Precio: ${op['current_price']} | PnL: {op['pnl_pct']}%")
+            send_message(msg)
+            sent.add("close_high")
 
 
 def refresh_data():
@@ -46,23 +98,17 @@ def refresh_data():
     clean = sanitize(results)
 
     for r in clean:
-        if r.get("error"):
-            continue
-
-        # Actualizar outcomes de señales anteriores
+        if r.get("error"): continue
         update_outcomes(r["name"], r["price"])
-
-        # Detectar si la señal cambió → guardar en DB y notificar
         name = r["name"]
         signal = r["signal"]
         prev = state["last_signals"].get(name, "")
         is_actionable = "LONG" in signal or "SHORT" in signal
         changed = signal != prev
-
         if is_actionable and changed:
             save_signal(r)
             send_message(format_signal_message(r))
-            print(f"  Nueva señal guardada: {name} -> {signal}")
+            print(f"  Nueva señal: {name} -> {signal}")
             state["last_signals"][name] = signal
 
     CACHE_PATH.parent.mkdir(exist_ok=True)
@@ -71,10 +117,17 @@ def refresh_data():
 
     state["results"] = clean
     state["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
-    print(f"  Analisis completo — {len(results)} activos procesados")
+
+    # Chequear operaciones abiertas y enviar alertas
+    open_ops = get_open_operations()
+    if open_ops:
+        enriched = enrich_open_with_market(open_ops, clean)
+        check_operation_alerts(enriched)
+
+    print(f"  Analisis completo — {len(results)} activos | {len(open_ops)} ops abiertas")
 
 
-# ── Rutas ─────────────────────────────────────────────────────────────────────
+# ── Rutas web ────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
@@ -83,35 +136,84 @@ def index():
 
 @app.route("/api/data")
 def api_data():
-    payload = sanitize({
+    return Response(json.dumps(sanitize({
         "results": state["results"],
         "last_update": state["last_update"],
-    })
-    return Response(json.dumps(payload), mimetype="application/json")
+        "config": {
+            "capital": load_config().get("capital_disponible", 10000),
+            "risk_pct": load_config().get("risk_pct", 0.025),
+        }
+    })), mimetype="application/json")
 
 
 @app.route("/api/refresh")
 def api_refresh():
     refresh_data()
-    return Response(
-        json.dumps({"ok": True, "last_update": state["last_update"]}),
-        mimetype="application/json"
-    )
+    return Response(json.dumps({"ok": True, "last_update": state["last_update"]}),
+                    mimetype="application/json")
 
 
 @app.route("/api/stats")
 def api_stats():
-    stats = get_stats()
-    return Response(json.dumps(sanitize(stats)), mimetype="application/json")
+    return Response(json.dumps(sanitize(get_stats())), mimetype="application/json")
 
 
 @app.route("/api/signals")
 def api_signals():
-    signals = get_all_signals(100)
-    return Response(json.dumps(sanitize(signals)), mimetype="application/json")
+    return Response(json.dumps(sanitize(get_all_signals(100))), mimetype="application/json")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Operaciones ─────────────────────────────────────────────────────────────
+
+@app.route("/api/operations/open")
+def api_ops_open():
+    ops = get_open_operations()
+    enriched = enrich_open_with_market(ops, state["results"])
+    return Response(json.dumps(sanitize(enriched)), mimetype="application/json")
+
+
+@app.route("/api/operations/closed")
+def api_ops_closed():
+    ops = get_closed_operations(50)
+    return Response(json.dumps(sanitize(ops)), mimetype="application/json")
+
+
+@app.route("/api/operations/summary")
+def api_ops_summary():
+    return Response(json.dumps(sanitize(get_summary_stats())), mimetype="application/json")
+
+
+@app.route("/api/operations/create", methods=["POST"])
+def api_op_create():
+    data = request.json
+    # Limpiar tracking de alertas para nuevas operaciones
+    result = create_operation(data)
+    return Response(json.dumps(result), mimetype="application/json")
+
+
+@app.route("/api/operations/<int:op_id>/close", methods=["POST"])
+def api_op_close(op_id):
+    data = request.json
+    result = close_operation(op_id, float(data["exit_price"]), data.get("reason", "manual"))
+    # Limpiar tracking
+    state["operation_alerts_sent"].pop(op_id, None)
+    return Response(json.dumps(sanitize(result)), mimetype="application/json")
+
+
+@app.route("/api/operations/<int:op_id>/update", methods=["POST"])
+def api_op_update(op_id):
+    data = request.json
+    result = update_levels(
+        op_id,
+        stop_loss=float(data["stop_loss"]) if data.get("stop_loss") else None,
+        tp1=float(data["tp1"]) if data.get("tp1") else None,
+        tp2=float(data["tp2"]) if data.get("tp2") else None,
+        tp3=float(data["tp3"]) if data.get("tp3") else None,
+    )
+    return Response(json.dumps(result), mimetype="application/json")
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if CACHE_PATH.exists():
@@ -119,15 +221,13 @@ if __name__ == "__main__":
             with open(CACHE_PATH) as f:
                 state["results"] = json.load(f)
             print("Cache cargado")
-        except Exception:
-            pass
+        except Exception: pass
 
     refresh_data()
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(refresh_data, "interval", hours=4)
     scheduler.start()
-    print("\nScheduler activo — actualizacion cada 4 horas")
+    print("Scheduler activo - cada 4 horas")
     print("Dashboard en http://localhost:5000\n")
-
     app.run(host="0.0.0.0", port=5000, debug=False)
