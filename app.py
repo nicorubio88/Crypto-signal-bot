@@ -1,6 +1,6 @@
 """
 Dashboard web — Flask
-Accesible desde browser, se actualiza cada 4 horas
+Con tracking de señales y métricas de acertividad
 """
 
 import json
@@ -8,7 +8,8 @@ import numpy as np
 from flask import Flask, render_template, Response
 from apscheduler.schedulers.background import BackgroundScheduler
 from engine import run_analysis
-from telegram_bot import notify_if_signal
+from telegram_bot import notify_if_signal, format_signal_message, send_message
+from tracker import save_signal, update_outcomes, get_stats, get_all_signals
 from pathlib import Path
 from datetime import datetime
 
@@ -24,7 +25,6 @@ CACHE_PATH = Path(__file__).parent / "data" / "last_results.json"
 
 
 def sanitize(obj):
-    """Convierte tipos numpy/bool a tipos Python nativos para JSON."""
     if isinstance(obj, dict):
         return {k: sanitize(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -41,19 +41,33 @@ def sanitize(obj):
 
 
 def refresh_data():
-    """Corre el análisis y actualiza el estado global."""
     print(f"\n[{datetime.now().strftime('%H:%M UTC')}] Actualizando datos...")
     results = run_analysis()
     clean = sanitize(results)
 
-    # Guardar en cache
+    for r in clean:
+        if r.get("error"):
+            continue
+
+        # Actualizar outcomes de señales anteriores
+        update_outcomes(r["name"], r["price"])
+
+        # Detectar si la señal cambió → guardar en DB y notificar
+        name = r["name"]
+        signal = r["signal"]
+        prev = state["last_signals"].get(name, "")
+        is_actionable = "LONG" in signal or "SHORT" in signal
+        changed = signal != prev
+
+        if is_actionable and changed:
+            save_signal(r)
+            send_message(format_signal_message(r))
+            print(f"  Nueva señal guardada: {name} -> {signal}")
+            state["last_signals"][name] = signal
+
     CACHE_PATH.parent.mkdir(exist_ok=True)
     with open(CACHE_PATH, "w") as f:
         json.dump(clean, f, indent=2)
-
-    # Notificar por Telegram si hay señales
-    for r in clean:
-        state["last_signals"] = notify_if_signal(r, state["last_signals"])
 
     state["results"] = clean
     state["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
@@ -73,10 +87,7 @@ def api_data():
         "results": state["results"],
         "last_update": state["last_update"],
     })
-    return Response(
-        json.dumps(payload),
-        mimetype="application/json"
-    )
+    return Response(json.dumps(payload), mimetype="application/json")
 
 
 @app.route("/api/refresh")
@@ -88,10 +99,21 @@ def api_refresh():
     )
 
 
+@app.route("/api/stats")
+def api_stats():
+    stats = get_stats()
+    return Response(json.dumps(sanitize(stats)), mimetype="application/json")
+
+
+@app.route("/api/signals")
+def api_signals():
+    signals = get_all_signals(100)
+    return Response(json.dumps(sanitize(signals)), mimetype="application/json")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Cargar cache si existe
     if CACHE_PATH.exists():
         try:
             with open(CACHE_PATH) as f:
@@ -100,10 +122,8 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    # Primer análisis
     refresh_data()
 
-    # Scheduler cada 4 horas
     scheduler = BackgroundScheduler()
     scheduler.add_job(refresh_data, "interval", hours=4)
     scheduler.start()
