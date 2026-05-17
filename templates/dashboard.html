@@ -3,62 +3,112 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Crypto Signal Bot</title>
+<title>Crypto Signal Bot v2.1</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e6edf3; min-height: 100vh; padding: 20px; }
   header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
   h1 { font-size: 1.4rem; color: #58a6ff; }
   .meta { font-size: 0.8rem; color: #8b949e; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
   .tab { padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; border: 1px solid #30363d; background: #161b22; color: #8b949e; transition: all 0.2s; }
   .tab.active { background: #58a6ff; color: #0d1117; border-color: #58a6ff; font-weight: 600; }
   .btn { background: #21262d; border: 1px solid #30363d; color: #58a6ff; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.82rem; }
   .btn:hover { background: #30363d; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+
+  /* Cards */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; position: relative; overflow: hidden; }
   .card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
   .card.long::before { background: #2ea043; }
   .card.short::before { background: #da3633; }
   .card.neutral::before { background: #8b949e; }
-  .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
+
+  .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
   .asset-name { font-size: 1.3rem; font-weight: 700; }
   .asset-price { font-size: 1.1rem; color: #8b949e; }
+
+  .signal-block { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .signal-badge { padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 700; }
   .badge-long { background: #0f3320; color: #2ea043; border: 1px solid #2ea043; }
   .badge-short { background: #3d0f0f; color: #da3633; border: 1px solid #da3633; }
   .badge-neutral { background: #1c2128; color: #8b949e; border: 1px solid #8b949e; }
-  .score-section { margin-bottom: 16px; }
+
+  .confidence-badge { padding: 3px 10px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.5px; }
+  .conf-alta { background: #0f3320; color: #2ea043; }
+  .conf-media { background: #2d2100; color: #f0b429; }
+  .conf-baja { background: #1c2128; color: #8b949e; }
+
+  .signal-reason { font-size: 0.78rem; color: #8b949e; margin-top: 4px; font-style: italic; }
+
+  /* Trends multi-timeframe */
+  .trends-row { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .trend-pill { font-size: 0.7rem; padding: 3px 8px; border-radius: 4px; display: flex; align-items: center; gap: 4px; }
+  .trend-alcista { background: #0f3320; color: #2ea043; }
+  .trend-bajista { background: #3d0f0f; color: #da3633; }
+  .trend-lateral { background: #1c2128; color: #8b949e; }
+  .trend-label { font-size: 0.62rem; opacity: 0.7; }
+
+  /* Score bar */
+  .score-section { margin-bottom: 14px; }
   .score-label { font-size: 0.75rem; color: #8b949e; margin-bottom: 6px; display: flex; justify-content: space-between; }
-  .score-bar { background: #21262d; border-radius: 4px; height: 8px; overflow: hidden; }
-  .score-fill { height: 100%; border-radius: 4px; }
-  .fill-long { background: #2ea043; }
-  .fill-short { background: #da3633; }
+  .score-bar { background: #21262d; border-radius: 4px; height: 8px; overflow: hidden; position: relative; }
+  .score-bar::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #30363d; }
+  .score-fill { height: 100%; }
+  .fill-long { background: linear-gradient(90deg, #2ea043, #56d364); }
+  .fill-short { background: linear-gradient(270deg, #da3633, #f85149); }
   .fill-neutral { background: #8b949e; }
-  .indicators { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
-  .kpi { background: #0d1117; border-radius: 8px; padding: 8px 10px; }
-  .kpi-label { font-size: 0.7rem; color: #8b949e; margin-bottom: 2px; }
-  .kpi-value { font-size: 0.95rem; font-weight: 600; }
-  .conditions { margin-bottom: 16px; }
-  .cond-title { font-size: 0.75rem; color: #8b949e; margin-bottom: 8px; text-transform: uppercase; }
-  .cond-item { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; padding: 3px 0; color: #8b949e; }
-  .cond-item.pass { color: #e6edf3; }
-  .cond-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-  .dot-pass { background: #2ea043; }
-  .dot-fail { background: #da3633; }
-  .levels { background: #0d1117; border-radius: 8px; padding: 10px; font-size: 0.8rem; }
-  .levels-title { color: #8b949e; margin-bottom: 8px; font-size: 0.75rem; text-transform: uppercase; }
+
+  /* ADX indicator */
+  .adx-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; padding: 8px; background: #0d1117; border-radius: 6px; }
+  .adx-label { font-size: 0.7rem; color: #8b949e; }
+  .adx-value { font-size: 0.9rem; font-weight: 700; }
+  .adx-good { color: #2ea043; }
+  .adx-warn { color: #f0b429; }
+  .adx-bad { color: #da3633; }
+
+  /* Warnings */
+  .warning { background: #2d2100; border: 1px solid #bb8009; color: #f0b429; border-radius: 6px; padding: 8px 10px; font-size: 0.75rem; margin-bottom: 12px; }
+  .alert-rsi { background: #2d2100; border: 1px solid #bb8009; color: #f0b429; border-radius: 6px; padding: 6px 10px; font-size: 0.75rem; margin-bottom: 10px; }
+  .div-alert { background: #0f3320; border: 1px solid #2ea043; color: #2ea043; border-radius: 6px; padding: 6px 10px; font-size: 0.75rem; margin-bottom: 10px; }
+  .div-alert.bearish { background: #3d0f0f; border-color: #da3633; color: #da3633; }
+  .close-alert { background: #3d0f0f; border: 1px solid #da3633; color: #da3633; border-radius: 6px; padding: 8px 10px; font-size: 0.75rem; margin-bottom: 10px; }
+
+  /* KPIs */
+  .indicators { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .kpi { background: #0d1117; border-radius: 6px; padding: 6px 8px; }
+  .kpi-label { font-size: 0.65rem; color: #8b949e; margin-bottom: 2px; }
+  .kpi-value { font-size: 0.85rem; font-weight: 600; }
+
+  /* Levels */
+  .levels { background: #0d1117; border-radius: 8px; padding: 10px; font-size: 0.78rem; margin-bottom: 10px; }
+  .levels-title { color: #8b949e; margin-bottom: 6px; font-size: 0.72rem; text-transform: uppercase; }
   .level-row { display: flex; justify-content: space-between; padding: 2px 0; }
   .level-sl { color: #da3633; }
   .level-tp1 { color: #2ea043; }
   .level-tp2 { color: #56d364; }
-  .trend-1d { display: inline-block; font-size: 0.75rem; padding: 2px 8px; border-radius: 4px; margin-bottom: 12px; }
-  .trend-alcista { background: #0f3320; color: #2ea043; }
-  .trend-bajista { background: #3d0f0f; color: #da3633; }
-  .trend-lateral { background: #1c2128; color: #8b949e; }
-  .alert-rsi { background: #2d2100; border: 1px solid #bb8009; color: #f0b429; border-radius: 6px; padding: 6px 10px; font-size: 0.78rem; margin-bottom: 12px; }
+  .level-tp3 { color: #7ee787; }
+  .level-rr { color: #8b949e; font-size: 0.7rem; text-align: right; margin-top: 4px; }
 
-  /* Pestaña Stats */
+  /* Pivots */
+  .pivots { background: #0d1117; border-radius: 8px; padding: 10px; font-size: 0.75rem; margin-bottom: 10px; }
+  .pivots-title { color: #8b949e; margin-bottom: 6px; font-size: 0.7rem; text-transform: uppercase; }
+  .pivot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+  .pivot-item { display: flex; justify-content: space-between; }
+  .pivot-r { color: #da3633; }
+  .pivot-s { color: #2ea043; }
+  .pivot-p { color: #58a6ff; }
+
+  /* Conditions */
+  .conditions { margin-bottom: 12px; }
+  .cond-title { font-size: 0.72rem; color: #8b949e; margin-bottom: 6px; text-transform: uppercase; }
+  .cond-item { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; padding: 2px 0; color: #6e7681; }
+  .cond-item.pass { color: #e6edf3; }
+  .cond-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+  .dot-pass { background: #2ea043; }
+  .dot-fail { background: #6e7681; }
+
+  /* Stats panel */
   .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
   .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; }
   .stat-asset { font-size: 1.1rem; font-weight: 700; margin-bottom: 16px; color: #58a6ff; }
@@ -73,22 +123,27 @@
   .recent-title { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; margin-bottom: 8px; }
   .signal-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #21262d; font-size: 0.8rem; }
   .signal-row:last-child { border-bottom: none; }
-  .sig-date { color: #8b949e; font-size: 0.72rem; }
-  .sig-result { display: flex; gap: 6px; }
-  .res-dot { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.65rem; font-weight: 700; }
+  .sig-date { color: #8b949e; font-size: 0.7rem; }
+  .sig-result { display: flex; gap: 4px; align-items: center; }
+  .res-dot { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.65rem; font-weight: 700; }
   .res-win { background: #0f3320; color: #2ea043; }
   .res-loss { background: #3d0f0f; color: #da3633; }
   .res-pending { background: #1c2128; color: #8b949e; }
   .no-data { text-align: center; color: #8b949e; padding: 40px; font-size: 0.9rem; }
   .loading { text-align: center; color: #8b949e; padding: 60px; }
   .hidden { display: none; }
+
+  @media (max-width: 500px) {
+    body { padding: 12px; }
+    .indicators { grid-template-columns: 1fr 1fr; }
+  }
 </style>
 </head>
 <body>
 
 <header>
   <div>
-    <h1>Crypto Signal Bot</h1>
+    <h1>Crypto Signal Bot <span style="font-size:0.75rem; color:#8b949e; font-weight:normal">v2.1</span></h1>
     <div class="meta" id="last-update">Cargando...</div>
   </div>
   <button class="btn" onclick="forceRefresh()">Actualizar</button>
@@ -100,17 +155,14 @@
   <div class="tab" onclick="showTab('history')">Historial</div>
 </div>
 
-<!-- Tab: Señales -->
 <div id="tab-signals">
   <div id="grid" class="grid"><div class="loading">Cargando análisis...</div></div>
 </div>
 
-<!-- Tab: Acertividad -->
 <div id="tab-stats" class="hidden">
   <div id="stats-grid" class="stats-grid"><div class="loading">Cargando estadísticas...</div></div>
 </div>
 
-<!-- Tab: Historial -->
 <div id="tab-history" class="hidden">
   <div id="history-table"><div class="loading">Cargando historial...</div></div>
 </div>
@@ -126,73 +178,166 @@ function showTab(tab) {
   document.getElementById('tab-signals').classList.toggle('hidden', tab !== 'signals');
   document.getElementById('tab-stats').classList.toggle('hidden', tab !== 'stats');
   document.getElementById('tab-history').classList.toggle('hidden', tab !== 'history');
-
   if (tab === 'stats') loadStats();
   if (tab === 'history') loadHistory();
 }
 
-// ── Señales en vivo ──────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function sigClass(s) { return s?.includes('LONG') ? 'long' : s?.includes('SHORT') ? 'short' : 'neutral'; }
+function badgeClass(s) { return s?.includes('LONG') ? 'badge-long' : s?.includes('SHORT') ? 'badge-short' : 'badge-neutral'; }
+function fillClass(s) { return s?.includes('LONG') ? 'fill-long' : s?.includes('SHORT') ? 'fill-short' : 'fill-neutral'; }
+function trendClass(t) { return t === 'ALCISTA' ? 'trend-alcista' : t === 'BAJISTA' ? 'trend-bajista' : 'trend-lateral'; }
+function confClass(c) { return c === 'ALTA' ? 'conf-alta' : c === 'MEDIA' ? 'conf-media' : 'conf-baja'; }
+function scoreWidth(score, max) { return Math.round(((score + max) / (max * 2)) * 100); }
+function fmt(n) { return n != null ? Number(n).toLocaleString(undefined, {maximumFractionDigits: 4}) : '—'; }
+function adxClass(a) { return a >= 30 ? 'adx-good' : a >= 25 ? 'adx-warn' : 'adx-bad'; }
+
+// ── Render Card ──────────────────────────────────────────────────────────────
+
+function renderCard(r) {
+  if (r.error) return `<div class="card"><div style="color:#da3633">${r.name}: ${r.error}</div></div>`;
+
+  const sc = sigClass(r.signal), bc = badgeClass(r.signal), fc = fillClass(r.signal);
+  const sw = scoreWidth(r.score, r.max_score);
+  const isLong = r.signal?.includes('LONG'), isShort = r.signal?.includes('SHORT');
+
+  // Trends multi-timeframe
+  const trendsHtml = `
+    <div class="trends-row">
+      <span class="trend-pill ${trendClass(r.trend_1w)}"><span class="trend-label">1W</span> ${r.trend_1w || '—'}</span>
+      <span class="trend-pill ${trendClass(r.trend_1d)}"><span class="trend-label">1D</span> ${r.trend_1d || '—'}</span>
+      <span class="trend-pill ${trendClass(r.trend_1h)}"><span class="trend-label">1H</span> ${r.trend_1h || '—'}</span>
+    </div>`;
+
+  // ADX bar
+  const adxHtml = r.adx != null ? `
+    <div class="adx-row">
+      <span class="adx-label">ADX:</span>
+      <span class="adx-value ${adxClass(r.adx)}">${r.adx}</span>
+      <span style="margin-left:auto;font-size:0.7rem;color:#8b949e">
+        ${r.market_trending ? '✓ Tendencia clara' : '⚠ Mercado lateral'}
+      </span>
+    </div>` : '';
+
+  // Warnings
+  const warningsHtml = (r.warnings || []).map(w => `<div class="warning">⚠ ${w}</div>`).join('');
+
+  // Divergencias
+  let divHtml = '';
+  if (r.divergence?.bullish) divHtml += `<div class="div-alert">📈 Divergencia RSI alcista detectada (+3 puntos)</div>`;
+  if (r.divergence?.bearish) divHtml += `<div class="div-alert bearish">📉 Divergencia RSI bajista detectada (-3 puntos)</div>`;
+
+  // BB Squeeze
+  if (r.bb_squeeze) divHtml += `<div class="alert-rsi">⚡ Bollinger Squeeze — movimiento fuerte próximo</div>`;
+
+  // RSI extremos
+  if (r.rsi6_oversold) divHtml += `<div class="alert-rsi">RSI(6) en sobreventa (${r.rsi6}) — posible rebote</div>`;
+  if (r.rsi6_overbought) divHtml += `<div class="alert-rsi">RSI(6) en sobrecompra (${r.rsi6}) — posible corrección</div>`;
+
+  // Señales de cierre
+  let closeHtml = '';
+  if (r.close_long?.should_close && (isLong || r.signal === 'NEUTRAL')) {
+    closeHtml += `<div class="close-alert">
+      🔴 Cerrar LONG si tenés (${r.close_long.urgency}): ${r.close_long.reasons.join(', ')}
+    </div>`;
+  }
+  if (r.close_short?.should_close && (isShort || r.signal === 'NEUTRAL')) {
+    closeHtml += `<div class="close-alert">
+      🟢 Cerrar SHORT si tenés (${r.close_short.urgency}): ${r.close_short.reasons.join(', ')}
+    </div>`;
+  }
+
+  // Niveles
+  const lvl = r.levels || {};
+  const sl  = isLong ? lvl.stop_long  : isShort ? lvl.stop_short  : null;
+  const tp1 = isLong ? lvl.tp1_long   : isShort ? lvl.tp1_short   : null;
+  const tp2 = isLong ? lvl.tp2_long   : isShort ? lvl.tp2_short   : null;
+  const tp3 = isLong ? lvl.tp3_long   : isShort ? lvl.tp3_short   : null;
+  const levelsHtml = sl ? `
+    <div class="levels">
+      <div class="levels-title">Niveles ATR — Perfil medio-agresivo</div>
+      <div class="level-row"><span class="level-sl">🛑 Stop Loss</span><span class="level-sl">$${fmt(sl)}</span></div>
+      <div class="level-row"><span class="level-tp1">🎯 TP1 (cerrar 40%)</span><span class="level-tp1">$${fmt(tp1)}</span></div>
+      <div class="level-row"><span class="level-tp2">🎯 TP2 (cerrar 40%)</span><span class="level-tp2">$${fmt(tp2)}</span></div>
+      <div class="level-row"><span class="level-tp3">🎯 TP3 (dejar correr 20%)</span><span class="level-tp3">$${fmt(tp3)}</span></div>
+      <div class="level-rr">R/R ratio: 1:${lvl.rr_ratio} | ATR: $${fmt(lvl.atr)}</div>
+    </div>` : '';
+
+  // Pivots
+  const p = r.pivots || {};
+  const pivotsHtml = p.pivot != null ? `
+    <div class="pivots">
+      <div class="pivots-title">Soportes y resistencias</div>
+      <div class="pivot-grid">
+        <div class="pivot-item"><span class="pivot-r">R2</span><span class="pivot-r">$${fmt(p.r2)}</span></div>
+        <div class="pivot-item"><span class="pivot-r">R1</span><span class="pivot-r">$${fmt(p.r1)}</span></div>
+        <div class="pivot-item"><span class="pivot-p">Pivot</span><span class="pivot-p">$${fmt(p.pivot)}</span></div>
+        <div class="pivot-item"></div>
+        <div class="pivot-item"><span class="pivot-s">S1</span><span class="pivot-s">$${fmt(p.s1)}</span></div>
+        <div class="pivot-item"><span class="pivot-s">S2</span><span class="pivot-s">$${fmt(p.s2)}</span></div>
+      </div>
+    </div>` : '';
+
+  // Conditions
+  const condHtml = Object.entries(r.conditions || {}).map(([k,v]) =>
+    `<div class="cond-item ${v?'pass':''}"><div class="cond-dot ${v?'dot-pass':'dot-fail'}"></div>${k}</div>`
+  ).join('');
+
+  // Reason if NEUTRAL
+  const reasonHtml = r.signal_reason ? `<div class="signal-reason">${r.signal_reason}</div>` : '';
+
+  return `<div class="card ${sc}">
+    <div class="card-header">
+      <div>
+        <div class="asset-name">${r.name}/USDT</div>
+        <div class="asset-price">$${fmt(r.price)}</div>
+      </div>
+      <div class="signal-block">
+        <span class="signal-badge ${bc}">${r.signal || 'NEUTRAL'}</span>
+        ${r.confidence && r.confidence !== '—' ? `<span class="confidence-badge ${confClass(r.confidence)}">${r.confidence}</span>` : ''}
+      </div>
+    </div>
+    ${reasonHtml}
+    ${trendsHtml}
+    ${adxHtml}
+    <div class="score-section">
+      <div class="score-label">
+        <span>Score ponderado</span>
+        <span>${r.score > 0 ? '+' : ''}${r.score} / ${r.max_score}</span>
+      </div>
+      <div class="score-bar"><div class="score-fill ${fc}" style="width:${sw}%"></div></div>
+    </div>
+    ${warningsHtml}
+    ${divHtml}
+    ${closeHtml}
+    <div class="indicators">
+      <div class="kpi"><div class="kpi-label">RSI 6</div><div class="kpi-value" style="color:${r.rsi6<30||r.rsi6>70?'#f0b429':'#e6edf3'}">${r.rsi6 ?? '—'}</div></div>
+      <div class="kpi"><div class="kpi-label">RSI 20</div><div class="kpi-value">${r.rsi20 ?? '—'}</div></div>
+      <div class="kpi"><div class="kpi-label">MACD hist</div><div class="kpi-value" style="color:${r.macd_hist>0?'#2ea043':'#da3633'}">${r.macd_hist ?? '—'}</div></div>
+      <div class="kpi"><div class="kpi-label">EMA 20</div><div class="kpi-value">$${fmt(r.ema20)}</div></div>
+      <div class="kpi"><div class="kpi-label">VWAP</div><div class="kpi-value">$${fmt(r.vwap)}</div></div>
+      <div class="kpi"><div class="kpi-label">OBV</div><div class="kpi-value" style="color:${r.obv_trend==='ALCISTA'?'#2ea043':r.obv_trend==='BAJISTA'?'#da3633':'#8b949e'}">${r.obv_trend}</div></div>
+    </div>
+    ${levelsHtml}
+    ${pivotsHtml}
+    <div class="conditions"><div class="cond-title">Condiciones evaluadas</div>${condHtml}</div>
+  </div>`;
+}
+
+// ── Load Data ────────────────────────────────────────────────────────────────
 
 async function loadData() {
   try {
     const r = await fetch('/api/data');
     const data = await r.json();
     document.getElementById('last-update').textContent = 'Última actualización: ' + (data.last_update || '—');
-    renderGrid(data.results || []);
+    document.getElementById('grid').innerHTML = (data.results || []).length
+      ? data.results.map(renderCard).join('')
+      : '<div class="loading">Sin datos</div>';
   } catch(e) {
     document.getElementById('grid').innerHTML = '<div class="loading">Error al cargar datos</div>';
   }
-}
-
-function getSignalClass(s) { return s?.includes('LONG') ? 'long' : s?.includes('SHORT') ? 'short' : 'neutral'; }
-function getBadgeClass(s)  { return s?.includes('LONG') ? 'badge-long' : s?.includes('SHORT') ? 'badge-short' : 'badge-neutral'; }
-function getFillClass(s)   { return s?.includes('LONG') ? 'fill-long' : s?.includes('SHORT') ? 'fill-short' : 'fill-neutral'; }
-function getTrendClass(t)  { return t === 'ALCISTA' ? 'trend-alcista' : t === 'BAJISTA' ? 'trend-bajista' : 'trend-lateral'; }
-function scoreWidth(score, max) { return Math.round(((score + max) / (max * 2)) * 100); }
-
-function renderCard(r) {
-  if (r.error) return `<div class="card"><div style="color:#da3633">${r.name}: ${r.error}</div></div>`;
-  const sc = getSignalClass(r.signal), bc = getBadgeClass(r.signal), fc = getFillClass(r.signal);
-  const tc = getTrendClass(r.trend_1d), sw = scoreWidth(r.score, r.max_score);
-  const isLong = r.signal?.includes('LONG'), isShort = r.signal?.includes('SHORT');
-  const lvl = r.levels || {};
-  const sl  = isLong ? lvl.stop_long  : isShort ? lvl.stop_short  : null;
-  const tp1 = isLong ? lvl.tp1_long   : isShort ? lvl.tp1_short   : null;
-  const tp2 = isLong ? lvl.tp2_long   : isShort ? lvl.tp2_short   : null;
-  const condHtml = Object.entries(r.conditions || {}).map(([k,v]) =>
-    `<div class="cond-item ${v?'pass':''}"><div class="cond-dot ${v?'dot-pass':'dot-fail'}"></div>${k}</div>`).join('');
-  const rsiAlert = r.rsi6_oversold ? `<div class="alert-rsi">RSI(6) en sobreventa (${r.rsi6}) — posible rebote</div>`
-    : r.rsi6_overbought ? `<div class="alert-rsi">RSI(6) en sobrecompra (${r.rsi6}) — posible corrección</div>` : '';
-  const levelsHtml = sl ? `<div class="levels"><div class="levels-title">Niveles sugeridos (ATR×2)</div>
-    <div class="level-row"><span class="level-sl">Stop Loss</span><span class="level-sl">$${Number(sl).toLocaleString()}</span></div>
-    <div class="level-row"><span class="level-tp1">TP1</span><span class="level-tp1">$${Number(tp1).toLocaleString()}</span></div>
-    <div class="level-row"><span class="level-tp2">TP2</span><span class="level-tp2">$${Number(tp2).toLocaleString()}</span></div></div>` : '';
-  return `<div class="card ${sc}">
-    <div class="card-header">
-      <div><div class="asset-name">${r.name}/USDT</div><div class="asset-price">$${Number(r.price).toLocaleString()}</div></div>
-      <div class="signal-badge ${bc}">${r.signal || 'NEUTRAL'}</div>
-    </div>
-    <span class="trend-1d ${tc}">1D: ${r.trend_1d || '—'}</span>
-    <div class="score-section">
-      <div class="score-label"><span>Score de señal</span><span>${r.score > 0 ? '+' : ''}${r.score} / ${r.max_score}</span></div>
-      <div class="score-bar"><div class="score-fill ${fc}" style="width:${sw}%"></div></div>
-    </div>
-    ${rsiAlert}
-    <div class="indicators">
-      <div class="kpi"><div class="kpi-label">RSI (6)</div><div class="kpi-value" style="color:${r.rsi6<30||r.rsi6>70?'#f0b429':'#e6edf3'}">${r.rsi6}</div></div>
-      <div class="kpi"><div class="kpi-label">RSI (20)</div><div class="kpi-value">${r.rsi20}</div></div>
-      <div class="kpi"><div class="kpi-label">MACD hist</div><div class="kpi-value" style="color:${r.macd_hist>0?'#2ea043':'#da3633'}">${r.macd_hist}</div></div>
-      <div class="kpi"><div class="kpi-label">EMA 20</div><div class="kpi-value">$${Number(r.ema20).toLocaleString()}</div></div>
-    </div>
-    <div class="conditions"><div class="cond-title">Condiciones</div>${condHtml}</div>
-    ${levelsHtml}
-  </div>`;
-}
-
-function renderGrid(results) {
-  document.getElementById('grid').innerHTML = results.length
-    ? results.map(renderCard).join('')
-    : '<div class="loading">Sin datos</div>';
 }
 
 // ── Acertividad ──────────────────────────────────────────────────────────────
@@ -203,7 +348,7 @@ async function loadStats() {
   try {
     const r = await fetch('/api/stats');
     const stats = await r.json();
-    if (!stats.length) { el.innerHTML = '<div class="no-data">Sin señales registradas todavía.<br>Las estadísticas aparecen después de la primera señal detectada.</div>'; return; }
+    if (!stats.length) { el.innerHTML = '<div class="no-data">Sin señales registradas todavía.</div>'; return; }
     el.innerHTML = stats.map(renderStatCard).join('');
   } catch(e) { el.innerHTML = '<div class="loading">Error al cargar</div>'; }
 }
@@ -213,19 +358,16 @@ function wrClass(rate) { return rate >= 60 ? 'wr-good' : rate >= 45 ? 'wr-neutra
 function renderStatCard(s) {
   function wrBox(label, data) {
     if (!data) return `<div class="wr-box"><div class="wr-label">${label}</div><div class="wr-value wr-neutral">—</div><div class="wr-sub">Sin datos</div></div>`;
-    const cls = wrClass(data.rate);
-    return `<div class="wr-box"><div class="wr-label">${label}</div><div class="wr-value ${cls}">${data.rate}%</div><div class="wr-sub">${data.wins}/${data.total} | avg ${data.avg_pct}%</div></div>`;
+    return `<div class="wr-box"><div class="wr-label">${label}</div><div class="wr-value ${wrClass(data.rate)}">${data.rate}%</div><div class="wr-sub">${data.wins}/${data.total} | avg ${data.avg_pct}%</div></div>`;
   }
   const recentHtml = s.recent.map(r => {
     const dir = r.signal?.includes('LONG') ? 'L' : r.signal?.includes('SHORT') ? 'S' : 'N';
     const dirColor = dir === 'L' ? '#2ea043' : dir === 'S' ? '#da3633' : '#8b949e';
-    const dot = (win) => win === null || win === undefined
-      ? `<div class="res-dot res-pending">?</div>`
-      : win ? `<div class="res-dot res-win">W</div>` : `<div class="res-dot res-loss">L</div>`;
+    const dot = (win) => win == null ? `<div class="res-dot res-pending">?</div>` : win ? `<div class="res-dot res-win">W</div>` : `<div class="res-dot res-loss">L</div>`;
     const date = r.created_at ? r.created_at.substring(0,16).replace('T',' ') : '—';
     return `<div class="signal-row">
-      <div><span style="color:${dirColor};font-weight:700">${dir}</span> $${Number(r.price_entry).toLocaleString()} <span class="sig-date">${date}</span></div>
-      <div class="sig-result">${dot(r.win_4h)}<span style="font-size:0.65rem;color:#8b949e">4H</span>${dot(r.win_24h)}<span style="font-size:0.65rem;color:#8b949e">24H</span>${dot(r.win_72h)}<span style="font-size:0.65rem;color:#8b949e">72H</span></div>
+      <div><span style="color:${dirColor};font-weight:700">${dir}</span> $${fmt(r.price_entry)} <span class="sig-date">${date}</span></div>
+      <div class="sig-result">${dot(r.win_4h)}<span style="font-size:0.62rem;color:#8b949e">4H</span>${dot(r.win_24h)}<span style="font-size:0.62rem;color:#8b949e">24H</span>${dot(r.win_72h)}<span style="font-size:0.62rem;color:#8b949e">72H</span></div>
     </div>`;
   }).join('');
   return `<div class="stat-card">
@@ -249,7 +391,7 @@ async function loadHistory() {
       const dir = s.signal?.includes('LONG') ? 'LONG' : s.signal?.includes('SHORT') ? 'SHORT' : 'NEUTRAL';
       const dirColor = dir === 'LONG' ? '#2ea043' : dir === 'SHORT' ? '#da3633' : '#8b949e';
       const dot = (win, pct) => {
-        if (win === null || win === undefined) return '<span style="color:#8b949e">?</span>';
+        if (win == null) return '<span style="color:#8b949e">?</span>';
         const sign = pct > 0 ? '+' : '';
         return `<span style="color:${win?'#2ea043':'#da3633'}">${win?'W':'L'} ${sign}${pct}%</span>`;
       };
@@ -258,7 +400,7 @@ async function loadHistory() {
         <span style="color:#8b949e;width:130px;flex-shrink:0">${date}</span>
         <span style="font-weight:700;width:40px">${s.asset}</span>
         <span style="color:${dirColor};width:60px">${dir}</span>
-        <span style="width:90px">$${Number(s.price_entry).toLocaleString()}</span>
+        <span style="width:90px">$${fmt(s.price_entry)}</span>
         <span style="width:80px">${dot(s.win_4h, s.pct_4h)} 4H</span>
         <span style="width:80px">${dot(s.win_24h, s.pct_24h)} 24H</span>
         <span>${dot(s.win_72h, s.pct_72h)} 72H</span>
