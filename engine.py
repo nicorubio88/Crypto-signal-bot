@@ -1,8 +1,9 @@
 """
 Motor de datos y cálculo de indicadores
-Consume API pública de Binance — sin cuenta, sin riesgo
+Fuente: Kraken API pública (sin cuenta, sin límites, sin geo-restricciones)
 """
 
+import time
 import requests
 import pandas as pd
 import pandas_ta as ta
@@ -11,49 +12,43 @@ from datetime import datetime
 # ── Configuración ────────────────────────────────────────────────────────────
 
 SYMBOLS = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "SOL": "solana",
-    "XRP": "ripple",
+    "BTC": "XBTUSD",
+    "ETH": "ETHUSD",
+    "SOL": "SOLUSD",
+    "XRP": "XRPUSD",
 }
 
-COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/{id}/ohlc"
+KRAKEN_URL = "https://api.kraken.com/0/public/OHLC"
+KRAKEN_INTERVALS = {"4h": 240, "1d": 1440}
 
-INTERVAL_DAYS = {
-    "4h":  30,
-    "1d":  365,
-}
-
-# ── Fetch de velas ───────────────────────────────────────────────────────────
+# ── Fetch de velas desde Kraken ──────────────────────────────────────────────
 
 def fetch_candles(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
     """
-    Descarga velas de CoinGecko y devuelve DataFrame limpio.
+    Descarga velas de Kraken.
     interval: '4h' | '1d'
     """
-    days = INTERVAL_DAYS.get(interval, 30)
-    url = COINGECKO_URL.format(id=symbol)
-    params = {"vs_currency": "usd", "days": days}
-
-    resp = requests.get(url, params=params, timeout=15)
+    params = {"pair": symbol, "interval": KRAKEN_INTERVALS[interval]}
+    resp = requests.get(KRAKEN_URL, params=params, timeout=15)
     resp.raise_for_status()
 
-    raw = resp.json()
-    df = pd.DataFrame(raw, columns=["open_time", "open", "high", "low", "close"])
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-    df["volume"] = df["close"]  # CoinGecko OHLC no trae volumen por vela
+    data = resp.json()
+    if data.get("error"):
+        raise ValueError(f"Kraken error: {data['error']}")
 
+    result = data["result"]
+    pair_key = [k for k in result.keys() if k != "last"][0]
+    raw = result[pair_key]
+
+    df = pd.DataFrame(raw, columns=[
+        "open_time", "open", "high", "low", "close", "vwap", "volume", "count"
+    ])
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="s")
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
 
     df.set_index("open_time", inplace=True)
-
-    # Resamplear al intervalo correcto
-    rule = "4h" if interval == "4h" else "1D"
-    df = df.resample(rule).agg({
-        "open": "first", "high": "max",
-        "low": "min", "close": "last", "volume": "sum"
-    }).dropna()
+    df = df.tail(limit)
 
     return df[["open", "high", "low", "close", "volume"]]
 
@@ -61,40 +56,37 @@ def fetch_candles(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
 # ── Cálculo de indicadores ───────────────────────────────────────────────────
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Agrega todos los indicadores al DataFrame.
-    """
     c = df["close"]
     v = df["volume"]
 
-    # Medias móviles simples
     df["MA20"]  = ta.sma(c, 20)
     df["MA50"]  = ta.sma(c, 50)
     df["MA200"] = ta.sma(c, 200)
-
-    # Medias móviles exponenciales
     df["EMA20"]  = ta.ema(c, 20)
     df["EMA50"]  = ta.ema(c, 50)
     df["EMA200"] = ta.ema(c, 200)
 
-    # Bollinger Bands (20, 2)
+    # Bollinger Bands — detectar nombre de columna dinámicamente
     bb = ta.bbands(c, length=20, std=2)
-    df["BB_UP"] = bb["BBU_20_2.0"]
-    df["BB_MB"] = bb["BBM_20_2.0"]
-    df["BB_DN"] = bb["BBL_20_2.0"]
+    bb_up_col = [col for col in bb.columns if col.startswith("BBU")][0]
+    bb_mb_col = [col for col in bb.columns if col.startswith("BBM")][0]
+    bb_dn_col = [col for col in bb.columns if col.startswith("BBL")][0]
+    df["BB_UP"] = bb[bb_up_col]
+    df["BB_MB"] = bb[bb_mb_col]
+    df["BB_DN"] = bb[bb_dn_col]
 
-    # RSI múltiple
     df["RSI6"]  = ta.rsi(c, 6)
     df["RSI20"] = ta.rsi(c, 20)
     df["RSI50"] = ta.rsi(c, 50)
 
-    # MACD (12, 26, 9)
     macd = ta.macd(c, fast=12, slow=26, signal=9)
-    df["MACD"]        = macd["MACD_12_26_9"]
-    df["MACD_SIGNAL"] = macd["MACDs_12_26_9"]
-    df["MACD_HIST"]   = macd["MACDh_12_26_9"]
+    macd_col     = [col for col in macd.columns if col.startswith("MACD_")][0]
+    macds_col    = [col for col in macd.columns if col.startswith("MACDs")][0]
+    macdh_col    = [col for col in macd.columns if col.startswith("MACDh")][0]
+    df["MACD"]        = macd[macd_col]
+    df["MACD_SIGNAL"] = macd[macds_col]
+    df["MACD_HIST"]   = macd[macdh_col]
 
-    # Volumen MA10 para comparar
     df["VOL_MA10"] = ta.sma(v, 10)
 
     return df
@@ -103,16 +95,10 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ── Sistema de scoring ───────────────────────────────────────────────────────
 
 def calculate_score(row: pd.Series) -> dict:
-    """
-    Evalúa cada condición y devuelve score total + detalle.
-    Score > 0 = sesgo alcista | Score < 0 = sesgo bajista
-    """
     conditions = {}
     score = 0
-
     price = row["close"]
 
-    # ── Capa 1: Tendencia ────────────────────────────────────────
     cond = price > row["EMA20"]
     conditions["Precio > EMA20"] = cond
     score += 1 if cond else -1
@@ -125,27 +111,21 @@ def calculate_score(row: pd.Series) -> dict:
     conditions["Precio > Bollinger MB"] = cond
     score += 1 if cond else -1
 
-    # ── Capa 2: Momentum ─────────────────────────────────────────
     cond = row["MACD_HIST"] > 0
     conditions["MACD histograma positivo"] = cond
     score += 1 if cond else -1
 
-    # Histograma creciendo (comparar con vela anterior no disponible en row único)
-    # Lo manejamos en analyze() con acceso al df completo
     cond = row["MACD"] > 0 and row["MACD_SIGNAL"] > 0
-    conditions["MACD líneas sobre cero"] = cond
+    conditions["MACD lineas sobre cero"] = cond
     score += 1 if cond else -1
 
     cond = row["RSI20"] > 55
     conditions["RSI(20) > 55"] = cond
     score += 1 if cond else -1
 
-    # RSI(6) sobreventa — señal especial de rebote
     cond_rsi_os = row["RSI6"] < 25
     conditions["RSI(6) < 25 (sobreventa)"] = cond_rsi_os
-    # No suma al score de tendencia, es una alerta de timing
 
-    # ── Capa 3: Volumen ──────────────────────────────────────────
     cond = row["volume"] > row["VOL_MA10"]
     conditions["Volumen > MA10"] = cond
     score += 1 if cond else -1
@@ -160,9 +140,6 @@ def calculate_score(row: pd.Series) -> dict:
 
 
 def get_signal(score: int, trend_1d: str) -> str:
-    """
-    Determina la señal final filtrando por tendencia diaria.
-    """
     if score >= 4:
         raw = "LONG"
     elif score <= -4:
@@ -170,17 +147,14 @@ def get_signal(score: int, trend_1d: str) -> str:
     else:
         raw = "NEUTRAL"
 
-    # Filtro de tendencia 1D — no operamos contra la marea
     if raw == "LONG" and trend_1d == "BAJISTA":
-        return "NEUTRAL ⚠️ (contra tendencia 1D)"
+        return "NEUTRAL (contra tendencia 1D)"
     if raw == "SHORT" and trend_1d == "ALCISTA":
-        return "NEUTRAL ⚠️ (contra tendencia 1D)"
-
+        return "NEUTRAL (contra tendencia 1D)"
     return raw
 
 
 def get_trend_1d(row: pd.Series) -> str:
-    """Determina tendencia del 1D basada en EMA20 y EMA50."""
     if row["close"] > row["EMA20"] and row["EMA20"] > row["EMA50"]:
         return "ALCISTA"
     elif row["close"] < row["EMA20"] and row["EMA20"] < row["EMA50"]:
@@ -190,11 +164,9 @@ def get_trend_1d(row: pd.Series) -> str:
 
 
 def get_levels(df: pd.DataFrame) -> dict:
-    """Calcula stop loss y take profit sugeridos."""
     last = df.iloc[-1]
     price = last["close"]
     atr = ta.atr(df["high"], df["low"], df["close"], length=14).iloc[-1]
-
     return {
         "stop_long":  round(price - 2 * atr, 4),
         "tp1_long":   round(price + 2 * atr, 4),
@@ -209,37 +181,24 @@ def get_levels(df: pd.DataFrame) -> dict:
 # ── Análisis completo por símbolo ────────────────────────────────────────────
 
 def analyze(name: str, symbol: str) -> dict:
-    """
-    Análisis completo de un activo.
-    Devuelve dict con todo lo necesario para dashboard y Telegram.
-    """
     try:
-        # Fetch datos
         df_4h = fetch_candles(symbol, "4h", limit=300)
+        time.sleep(1)  # pausa entre requests
         df_1d = fetch_candles(symbol, "1d", limit=300)
 
-        # Calcular indicadores
         df_4h = calculate_indicators(df_4h)
         df_1d = calculate_indicators(df_1d)
 
-        # Última vela completa (penúltima fila — la última puede estar incompleta)
         last_4h = df_4h.iloc[-2]
         last_1d = df_1d.iloc[-2]
 
-        # Scoring en 4H
         score_data = calculate_score(last_4h)
 
-        # Histograma MACD creciendo (comparación con vela anterior)
         macd_growing = df_4h["MACD_HIST"].iloc[-2] > df_4h["MACD_HIST"].iloc[-3]
         score_data["conditions"]["MACD histograma creciendo"] = macd_growing
 
-        # Tendencia 1D
         trend_1d = get_trend_1d(last_1d)
-
-        # Señal final
         signal = get_signal(score_data["score"], trend_1d)
-
-        # Niveles
         levels = get_levels(df_4h)
 
         return {
@@ -272,20 +231,20 @@ def analyze(name: str, symbol: str) -> dict:
 
 
 def run_analysis() -> list:
-    """Corre el análisis para todos los activos configurados."""
     results = []
     for name, symbol in SYMBOLS.items():
         print(f"  Analizando {name}...")
         results.append(analyze(name, symbol))
+        time.sleep(1)
     return results
 
 
 if __name__ == "__main__":
-    print("🔍 Corriendo análisis de prueba...")
+    print("Corriendo analisis de prueba...")
     results = run_analysis()
     for r in results:
         if r["error"]:
-            print(f"\n❌ {r['name']}: {r['error']}")
+            print(f"\n ERROR {r['name']}: {r['error']}")
         else:
             print(f"\n{'='*50}")
             print(f"{r['name']} | ${r['price']} | Score: {r['score']}/{r['max_score']} | {r['signal']}")
@@ -293,5 +252,5 @@ if __name__ == "__main__":
             print(f"RSI(6): {r['rsi6']} | RSI(20): {r['rsi20']}")
             print(f"MACD hist: {r['macd_hist']}")
             for cond, val in r['conditions'].items():
-                icon = "✅" if val else "❌"
-                print(f"  {icon} {cond}")
+                icon = "OK" if val else "NO"
+                print(f"  [{icon}] {cond}")
