@@ -280,12 +280,36 @@ def calculate_pivots(df: pd.DataFrame) -> dict:
 # ── Tendencia por timeframe ──────────────────────────────────────────────────
 
 def get_trend(row: pd.Series) -> str:
-    """Tendencia basada en alineacion EMA20 y EMA50."""
+    """
+    Tendencia basada en alineacion de 3 EMAs (20, 50, 200).
+
+    Estandar de la industria para evitar 'bear/bull traps':
+    - ALCISTA: precio > EMA20 > EMA50 > EMA200 (alineacion completa)
+    - BAJISTA: precio < EMA20 < EMA50 < EMA200 (alineacion completa)
+    - LATERAL: cualquier desalineacion
+
+    Para timeframes con pocos datos (1W con < 200 velas), usa EMA50 como fallback.
+    """
     if pd.isna(row.get("EMA20")) or pd.isna(row.get("EMA50")):
         return "LATERAL"
-    if row["close"] > row["EMA20"] and row["EMA20"] > row["EMA50"]:
+
+    price = row["close"]
+    ema20 = row["EMA20"]
+    ema50 = row["EMA50"]
+    ema200 = row.get("EMA200")
+
+    # Si EMA200 no esta disponible (pocas velas), usar logica de 2 EMAs
+    if pd.isna(ema200):
+        if price > ema20 and ema20 > ema50:
+            return "ALCISTA"
+        if price < ema20 and ema20 < ema50:
+            return "BAJISTA"
+        return "LATERAL"
+
+    # Logica completa con 3 EMAs (mas precisa)
+    if price > ema20 and ema20 > ema50 and ema50 > ema200:
         return "ALCISTA"
-    if row["close"] < row["EMA20"] and row["EMA20"] < row["EMA50"]:
+    if price < ema20 and ema20 < ema50 and ema50 < ema200:
         return "BAJISTA"
     return "LATERAL"
 
@@ -294,7 +318,7 @@ def get_trend(row: pd.Series) -> str:
 
 def calculate_score(df: pd.DataFrame) -> dict:
     """
-    Score ponderado v2.1 (max 14 puntos).
+    Score ponderado v2.2 (max 16 puntos).
     ADX < 25 = filtro obligatorio, no emite señal.
     """
     if len(df) < 3:

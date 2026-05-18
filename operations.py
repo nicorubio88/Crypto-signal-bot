@@ -27,6 +27,7 @@ def init_db():
             asset         TEXT NOT NULL,
             direction     TEXT NOT NULL,
             status        TEXT NOT NULL DEFAULT 'OPEN',
+            contract_type TEXT NOT NULL DEFAULT 'USDT-M',
 
             -- Entrada
             entry_price   REAL NOT NULL,
@@ -69,6 +70,14 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_status ON operations(status);
         CREATE INDEX IF NOT EXISTS idx_asset ON operations(asset);
     """)
+
+    # Migracion: agregar contract_type si la tabla existia sin esa columna
+    cursor = conn.execute("PRAGMA table_info(operations)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "contract_type" not in columns:
+        conn.execute("ALTER TABLE operations ADD COLUMN contract_type TEXT NOT NULL DEFAULT 'USDT-M'")
+        print("Migracion DB: columna contract_type agregada")
+
     conn.commit()
     conn.close()
 
@@ -132,14 +141,25 @@ def has_open_position(asset: str) -> bool:
 def create_operation(data: dict) -> dict:
     """
     Crea nueva operacion. Valida que no haya otra abierta del mismo activo.
+    Soporta USDT-M (tamaño en USD) y COIN-M (tamaño en crypto).
     """
     if has_open_position(data["asset"]):
         return {"ok": False, "error": f"Ya tenés una posición abierta de {data['asset']}"}
 
     entry      = float(data["entry_price"])
-    size_units = float(data["size_units"])
     leverage   = int(data.get("leverage", 1))
-    size_usd   = entry * size_units
+    contract_type = data.get("contract_type", "USDT-M")
+
+    # Calcular size_units y size_usd segun tipo de contrato
+    if contract_type == "COIN-M":
+        # Tamaño en crypto (BTC, ETH, SOL, XRP)
+        size_units = float(data["size_units"])
+        size_usd   = entry * size_units
+    else:
+        # USDT-M: tamaño en USD
+        size_usd   = float(data.get("size_usd", 0))
+        size_units = size_usd / entry if entry > 0 else 0
+
     margin_usd = size_usd / leverage if leverage > 0 else size_usd
 
     liquidation = calc_liquidation_price(entry, leverage, data["direction"])
@@ -147,15 +167,16 @@ def create_operation(data: dict) -> dict:
     conn = get_conn()
     cur = conn.execute("""
         INSERT INTO operations
-            (asset, direction, entry_price, size_units, size_usd,
+            (asset, direction, contract_type, entry_price, size_units, size_usd,
              leverage, margin_mode, margin_usd,
              stop_loss, tp1, tp2, tp3, liquidation,
              notes, opened_at,
              bot_signal_at_open, bot_score_at_open, bot_confidence_at_open)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data["asset"],
         data["direction"],
+        data.get("contract_type", "USDT-M"),
         entry,
         size_units,
         size_usd,

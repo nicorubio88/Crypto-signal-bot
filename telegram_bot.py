@@ -48,7 +48,7 @@ def format_signal_message(result: dict) -> str:
     price = result["price"]
     score = result["score"]
     max_s = result["max_score"]
-    trend = result["trend_1d"]
+    confidence = result.get("confidence", "—")
     levels = result["levels"]
 
     is_long  = "LONG" in signal
@@ -58,42 +58,80 @@ def format_signal_message(result: dict) -> str:
         sl = levels["stop_long"]
         tp1 = levels["tp1_long"]
         tp2 = levels["tp2_long"]
+        tp3 = levels["tp3_long"]
         direccion = "LONG"
     elif is_short:
         sl = levels["stop_short"]
         tp1 = levels["tp1_short"]
         tp2 = levels["tp2_short"]
+        tp3 = levels["tp3_short"]
         direccion = "SHORT"
     else:
-        sl = tp1 = tp2 = None
+        sl = tp1 = tp2 = tp3 = None
         direccion = "NEUTRAL"
+
+    # Formato adaptativo segun magnitud del precio
+    def fmt_price(p):
+        if p is None: return "—"
+        if abs(p) >= 1000: return f"${p:,.2f}"
+        elif abs(p) >= 10: return f"${p:.2f}"
+        else: return f"${p:.4f}"
 
     lines = [
         f"=== SENAL {direccion} - {name}/USDT ===",
-        f"Score: {score}/{max_s} | Precio: ${price:,}",
-        f"Tendencia 1D: {trend}",
-        f"RSI(6): {result['rsi6']} | RSI(20): {result['rsi20']}",
-        f"MACD hist: {result['macd_hist']}",
+        f"Confianza: {confidence}",
+        f"Score: {score}/{max_s} | Precio: {fmt_price(price)}",
         "",
-        "Condiciones:",
+        "TENDENCIAS MULTI-TIMEFRAME:",
+        f"  1W: {result.get('trend_1w', '—')}",
+        f"  1D: {result.get('trend_1d', '—')}",
+        f"  1H: {result.get('trend_1h', '—')} {'(confirma)' if result.get('confirm_1h') else '(no confirma)'}",
+        "",
+        "INDICADORES CLAVE:",
+        f"  ADX: {result.get('adx', '—')} {'(tendencia clara)' if result.get('market_trending') else '(lateral)'}",
+        f"  RSI(6): {result['rsi6']} | RSI(20): {result['rsi20']}",
+        f"  MACD hist: {result['macd_hist']}",
+        f"  OBV trend: {result.get('obv_trend', '—')}",
     ]
 
-    for cond, val in result["conditions"].items():
-        estado = "SI" if val else "NO"
-        lines.append(f"  [{estado}] {cond}")
+    # Divergencias - alta confiabilidad
+    div = result.get("divergence", {})
+    obv_div = result.get("obv_divergence", {})
+    div_alerts = []
+    if div.get("bullish"): div_alerts.append("Divergencia RSI ALCISTA")
+    if div.get("bearish"): div_alerts.append("Divergencia RSI BAJISTA")
+    if obv_div.get("bullish"): div_alerts.append("Divergencia OBV ALCISTA (acumulacion)")
+    if obv_div.get("bearish"): div_alerts.append("Divergencia OBV BAJISTA (distribucion)")
 
+    if div_alerts:
+        lines.append("")
+        lines.append("DIVERGENCIAS DETECTADAS:")
+        for a in div_alerts:
+            lines.append(f"  * {a}")
+
+    # Avisos RSI extremos
     if result.get("rsi6_oversold"):
         lines.append("")
-        lines.append("AVISO: RSI(6) en sobreventa - posible rebote")
+        lines.append(f"AVISO: RSI(6)={result['rsi6']} en sobreventa - posible rebote")
     if result.get("rsi6_overbought"):
         lines.append("")
-        lines.append("AVISO: RSI(6) en sobrecompra - posible correccion")
+        lines.append(f"AVISO: RSI(6)={result['rsi6']} en sobrecompra - posible correccion")
 
-    if sl:
+    # Bollinger Squeeze
+    if result.get("bb_squeeze"):
         lines.append("")
-        lines.append(f"Stop Loss: ${sl:,}")
-        lines.append(f"TP1: ${tp1:,}")
-        lines.append(f"TP2: ${tp2:,}")
+        lines.append("AVISO: Bollinger Squeeze - movimiento fuerte proximo")
+
+    # Niveles operativos
+    if sl is not None:
+        rr = levels.get("rr_ratio", "—")
+        lines.append("")
+        lines.append("NIVELES OPERATIVOS (perfil medio-agresivo):")
+        lines.append(f"  Stop Loss: {fmt_price(sl)}")
+        lines.append(f"  TP1 (40%): {fmt_price(tp1)}")
+        lines.append(f"  TP2 (40%): {fmt_price(tp2)}")
+        lines.append(f"  TP3 (20%): {fmt_price(tp3)}")
+        lines.append(f"  R/R ratio: 1:{rr}")
 
     lines.append("")
     lines.append(result.get("updated_at", ""))

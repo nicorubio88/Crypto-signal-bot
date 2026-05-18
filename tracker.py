@@ -9,6 +9,23 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 DB_PATH = Path(__file__).parent / "data" / "signals.db"
+CONFIG_PATH = Path(__file__).parent / "config.json"
+
+
+def _load_win_threshold() -> float:
+    """Lee umbral minimo de WIN desde config.json."""
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH) as f:
+                return float(json.load(f).get("win_threshold_pct", 0.3))
+        except Exception:
+            pass
+    return 0.3
+
+
+# Umbral minimo para considerar una operacion como WIN.
+# Por debajo de esto el movimiento esta dentro de fees + slippage tipico (~0.3%).
+WIN_THRESHOLD_PCT = _load_win_threshold()
 
 
 def get_conn():
@@ -98,10 +115,22 @@ def save_signal(result: dict) -> int:
 
 # ── Actualizar outcomes ──────────────────────────────────────────────────────
 
+def _is_win(pct: float, signal_dir: str) -> int:
+    """
+    Determina si una señal fue WIN o LOSS aplicando umbral minimo.
+    Un movimiento < 0.3% se considera dentro de ruido (fees + slippage).
+    """
+    if signal_dir == "LONG":
+        return 1 if pct > WIN_THRESHOLD_PCT else 0
+    elif signal_dir == "SHORT":
+        return 1 if pct < -WIN_THRESHOLD_PCT else 0
+    return 0
+
+
 def update_outcomes(asset: str, current_price: float):
     """
     Para cada señal pendiente de ese asset, verifica si pasaron 4H/24H/72H
-    y calcula el resultado (win/loss).
+    y calcula el resultado (win/loss) aplicando umbral minimo de fees.
     """
     conn = get_conn()
 
@@ -132,26 +161,23 @@ def update_outcomes(asset: str, current_price: float):
         # 4H — después de 4 horas
         if elapsed >= timedelta(hours=4) and row["price_4h"] is None:
             pct = ((current_price - row["price_entry"]) / row["price_entry"]) * 100
-            win = 1 if (signal_dir == "LONG" and pct > 0) or (signal_dir == "SHORT" and pct < 0) else 0
             updates["price_4h"] = current_price
             updates["pct_4h"] = round(pct, 3)
-            updates["win_4h"] = win
+            updates["win_4h"] = _is_win(pct, signal_dir)
 
         # 24H
         if elapsed >= timedelta(hours=24) and row["price_24h"] is None:
             pct = ((current_price - row["price_entry"]) / row["price_entry"]) * 100
-            win = 1 if (signal_dir == "LONG" and pct > 0) or (signal_dir == "SHORT" and pct < 0) else 0
             updates["price_24h"] = current_price
             updates["pct_24h"] = round(pct, 3)
-            updates["win_24h"] = win
+            updates["win_24h"] = _is_win(pct, signal_dir)
 
         # 72H
         if elapsed >= timedelta(hours=72) and row["price_72h"] is None:
             pct = ((current_price - row["price_entry"]) / row["price_entry"]) * 100
-            win = 1 if (signal_dir == "LONG" and pct > 0) or (signal_dir == "SHORT" and pct < 0) else 0
             updates["price_72h"] = current_price
             updates["pct_72h"] = round(pct, 3)
-            updates["win_72h"] = win
+            updates["win_72h"] = _is_win(pct, signal_dir)
 
         if updates:
             updates["checked_at"] = now.isoformat()

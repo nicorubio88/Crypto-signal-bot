@@ -1,0 +1,9 @@
+{
+  "telegram_token": "8976926845:AAH_ABRjLBksDFuSZfl7K3hXEYbQ9A_usdU",
+  "telegram_chat_id": "6926971403",
+  "capital_disponible": 10000,
+  "risk_pct": 0.025,
+  "full_analysis_interval_hours": 4,
+  "ops_check_interval_minutes": 2,
+  "win_threshold_pct": 0.3
+}

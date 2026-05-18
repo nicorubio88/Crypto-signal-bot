@@ -93,6 +93,7 @@ def check_operation_alerts(operations: list):
 
 
 def refresh_data():
+    """Analisis completo: indicadores + scoring + señales. Ciclo lento (4h)."""
     print(f"\n[{datetime.now().strftime('%H:%M UTC')}] Actualizando datos...")
     results = run_analysis()
     clean = sanitize(results)
@@ -125,6 +126,50 @@ def refresh_data():
         check_operation_alerts(enriched)
 
     print(f"  Analisis completo — {len(results)} activos | {len(open_ops)} ops abiertas")
+
+
+def check_operations_realtime():
+    """
+    Chequeo rapido cada 2 min para alertas de SL/TP/liquidacion.
+    Usa precios actuales de Kraken sin recalcular indicadores.
+    """
+    open_ops = get_open_operations()
+    if not open_ops:
+        return  # nada que chequear
+
+    try:
+        # Fetch solo precios actuales (1 vela 1h, mucho mas rapido que analisis completo)
+        from engine import SYMBOLS, fetch_candles
+        market_snapshots = []
+
+        for op in open_ops:
+            asset = op["asset"]
+            if not any(s["name"] == asset for s in market_snapshots):
+                symbol = SYMBOLS.get(asset)
+                if not symbol: continue
+                try:
+                    df = fetch_candles(symbol, "1h", limit=2)
+                    last_price = float(df.iloc[-1]["close"])
+                    # Buscar datos del bot en cache (signal/score actual)
+                    cached = next((r for r in state["results"] if r.get("name") == asset), {})
+                    market_snapshots.append({
+                        "name": asset,
+                        "price": last_price,
+                        "signal": cached.get("signal", "NEUTRAL"),
+                        "score": cached.get("score", 0),
+                        "confidence": cached.get("confidence", "—"),
+                        "close_long": cached.get("close_long", {"should_close": False}),
+                        "close_short": cached.get("close_short", {"should_close": False}),
+                    })
+                except Exception as e:
+                    print(f"  Error fetch precio {asset}: {e}")
+                    continue
+
+        if market_snapshots:
+            enriched = enrich_open_with_market(open_ops, market_snapshots)
+            check_operation_alerts(enriched)
+    except Exception as e:
+        print(f"  Error en check_operations_realtime: {e}")
 
 
 # ── Rutas web ────────────────────────────────────────────────────────────────
@@ -225,9 +270,16 @@ if __name__ == "__main__":
 
     refresh_data()
 
+    cfg = load_config()
+    full_interval = cfg.get("full_analysis_interval_hours", 4)
+    ops_interval = cfg.get("ops_check_interval_minutes", 2)
+
     scheduler = BackgroundScheduler()
-    scheduler.add_job(refresh_data, "interval", hours=4)
+    scheduler.add_job(refresh_data, "interval", hours=full_interval, id="full_analysis")
+    scheduler.add_job(check_operations_realtime, "interval", minutes=ops_interval, id="ops_check")
     scheduler.start()
-    print("Scheduler activo - cada 4 horas")
+    print(f"Scheduler activo:")
+    print(f"  - Analisis completo cada {full_interval}h")
+    print(f"  - Check de operaciones cada {ops_interval}min")
     print("Dashboard en http://localhost:5000\n")
     app.run(host="0.0.0.0", port=5000, debug=False)
