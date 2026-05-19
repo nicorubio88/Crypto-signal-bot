@@ -30,11 +30,21 @@ SYMBOLS = {
 KRAKEN_URL = "https://api.kraken.com/0/public/OHLC"
 KRAKEN_INTERVALS = {"1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
 
-# Score maximo teorico real (suma de todos los pesos positivos)
+# Funding rate de Binance Futures USDT-M (publico, sin auth)
+BINANCE_FUNDING_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
+BINANCE_FUNDING_SYMBOLS = {
+    "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "SOL": "SOLUSDT",
+    "XRP": "XRPUSDT",
+}
+
+# Score maximo teorico (suma de todos los pesos positivos)
 # EMA: 3 | Bollinger MB: 1 | VWAP: 1 | MACD: 2 | StochRSI: 1 |
 # RSI20: 1 | Divergencia RSI: 3 | OBV: 1 | Divergencia OBV: 2 | Volumen: 1 = 16
-MAX_SCORE = 16
-SIGNAL_THRESHOLD = 9  # ajustado proporcionalmente al nuevo max
+# + Funding rate: ±1 (opcional, si Binance esta disponible) = 17
+MAX_SCORE = 17
+SIGNAL_THRESHOLD = 9  # umbral base (se ajusta por ADX dinamicamente via get_adaptive_threshold)
 
 
 # ── Fetch de velas ────────────────────────────────────────────────────────────
@@ -57,6 +67,80 @@ def fetch_candles(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
         df[col] = df[col].astype(float)
     df.set_index("open_time", inplace=True)
     return df[["open", "high", "low", "close", "volume"]].tail(limit)
+
+
+# ── Fetch funding rate (Binance Futures - sentimiento de perpetuos) ──────────
+
+def fetch_funding_rate(asset: str) -> dict:
+    """
+    Funding rate de Binance USDT-M perpetuos. Indicador de sentimiento real:
+
+    - Funding POSITIVO: longs pagan a shorts → mercado sobrecomprado emocionalmente
+      * > 0.05% (8h)  → señal de saturación alcista, posible reversión bajista
+      * > 0.10% (8h)  → muy sobrecomprado, alta probabilidad de corrección
+
+    - Funding NEGATIVO: shorts pagan a longs → mercado sobrevendido emocionalmente
+      * < -0.05% (8h) → señal de capitulación, posible rebote alcista
+      * < -0.10% (8h) → muy sobrevendido, alta probabilidad de rebote
+
+    Binance cobra/paga funding cada 8h. Los valores aqui son por periodo (8h).
+
+    Fallback: si Binance bloquea (error 451 en algunos hosts), devuelve None
+    y el sistema sigue funcionando sin este indicador.
+    """
+    symbol = BINANCE_FUNDING_SYMBOLS.get(asset)
+    if not symbol:
+        return {"rate": None, "available": False, "reason": "Asset no soportado"}
+
+    try:
+        resp = requests.get(
+            BINANCE_FUNDING_URL,
+            params={"symbol": symbol},
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        # 451: bloqueo legal regional | 403: bloqueo por geo o WAF
+        if resp.status_code in (451, 403):
+            return {"rate": None, "available": False, "reason": f"Binance bloqueado ({resp.status_code})"}
+        resp.raise_for_status()
+        data = resp.json()
+
+        # lastFundingRate viene como decimal, ej. 0.0001 = 0.01% por periodo de 8h
+        rate = float(data.get("lastFundingRate", 0))
+        rate_pct = rate * 100  # convertir a porcentaje
+
+        # Clasificacion
+        if rate_pct > 0.10:
+            sentiment = "EUFORIA ALCISTA"
+            signal_impact = "BEARISH"  # contra-señal
+            score_adj = -1
+        elif rate_pct > 0.05:
+            sentiment = "Sobrecompra emocional"
+            signal_impact = "BEARISH"
+            score_adj = -1
+        elif rate_pct < -0.10:
+            sentiment = "CAPITULACIÓN BAJISTA"
+            signal_impact = "BULLISH"  # contra-señal
+            score_adj = 1
+        elif rate_pct < -0.05:
+            sentiment = "Sobreventa emocional"
+            signal_impact = "BULLISH"
+            score_adj = 1
+        else:
+            sentiment = "Neutral"
+            signal_impact = "NEUTRAL"
+            score_adj = 0
+
+        return {
+            "rate": round(rate_pct, 4),
+            "rate_annualized": round(rate_pct * 3 * 365, 2),  # 3 periodos/dia × 365 dias
+            "sentiment": sentiment,
+            "signal_impact": signal_impact,
+            "score_adj": score_adj,
+            "available": True,
+        }
+    except Exception as e:
+        return {"rate": None, "available": False, "reason": f"Error: {str(e)[:50]}"}
 
 
 # ── Calculo de indicadores ────────────────────────────────────────────────────
@@ -314,6 +398,77 @@ def get_trend(row: pd.Series) -> str:
     return "LATERAL"
 
 
+# ── Régimen del mercado (separado de la señal operativa) ─────────────────────
+
+def get_regime(trend_1w: str, trend_1d: str, trend_1h: str, adx: float) -> dict:
+    """
+    Clasifica el REGIMEN del mercado (en qué estado estamos) independiente
+    de si hay buena oportunidad operativa AHORA.
+
+    Diseño: separar "diagnóstico" de "tratamiento".
+    - Régimen: ¿estamos en bear, bull, lateral?
+    - Señal operativa: ¿es buen momento para entrar?
+
+    Da contexto incluso cuando la señal es NEUTRAL.
+    """
+    if pd.isna(adx):
+        adx = 0
+
+    # Alinear timeframes
+    tfs = [trend_1w, trend_1d, trend_1h]
+    bullish_count = sum(1 for t in tfs if t == "ALCISTA")
+    bearish_count = sum(1 for t in tfs if t == "BAJISTA")
+    lateral_count = sum(1 for t in tfs if t == "LATERAL")
+
+    # ── Régimen primario ────────────────────────────────────────────────────
+    if bullish_count >= 2 and adx >= 25:
+        if bullish_count == 3 and adx >= 35:
+            regime = "BULL FUERTE"
+            description = "Tendencia alcista clara en todos los timeframes con fuerza"
+        elif bullish_count == 3:
+            regime = "BULL"
+            description = "Tendencia alcista en todos los timeframes"
+        else:
+            regime = "BULL DÉBIL"
+            description = "Alcista predominante con un timeframe lateral o contrario"
+    elif bearish_count >= 2 and adx >= 25:
+        if bearish_count == 3 and adx >= 35:
+            regime = "BEAR FUERTE"
+            description = "Tendencia bajista clara en todos los timeframes con fuerza"
+        elif bearish_count == 3:
+            regime = "BEAR"
+            description = "Tendencia bajista en todos los timeframes"
+        else:
+            regime = "BEAR DÉBIL"
+            description = "Bajista predominante con un timeframe lateral o contrario"
+    elif adx < 20:
+        regime = "LATERAL ESTRICTO"
+        description = "Sin tendencia clara (ADX muy bajo) — rangeo puro"
+    elif lateral_count >= 2:
+        regime = "LATERAL"
+        description = "Múltiples timeframes laterales — sin convicción"
+    else:
+        regime = "TRANSICIÓN"
+        description = "Timeframes desalineados — posible cambio de tendencia"
+
+    # ── Bias direccional sugerido ──────────────────────────────────────────
+    if "BULL" in regime:
+        bias = "Sesgo LONG (buscar entradas en pullbacks)"
+    elif "BEAR" in regime:
+        bias = "Sesgo SHORT (buscar entradas en rebotes)"
+    elif regime == "TRANSICIÓN":
+        bias = "Esperar confirmación del próximo timeframe"
+    else:
+        bias = "No operar tendencia — eventualmente operar rangos"
+
+    return {
+        "regime": regime,
+        "description": description,
+        "bias": bias,
+        "strength_score": bullish_count - bearish_count,  # -3 a +3
+    }
+
+
 # ── Sistema de scoring ponderado ──────────────────────────────────────────────
 
 def calculate_score(df: pd.DataFrame) -> dict:
@@ -421,21 +576,28 @@ def calculate_score(df: pd.DataFrame) -> dict:
 
     # ── CAPA 3: VOLUMEN (max 4 puntos) ────────────────────────────────────────
 
-    # OBV vs MA20 — 1 punto
+    # OBV vs MA20 — 1 punto (peso REDUCIDO cuando tendencia es muy fuerte)
+    # Razon: en bears fuertes el OBV puede mentir por short-covering
     obv_bull = False
     if pd.notna(row.get("OBV_MA20")):
         obv_bull = row["OBV"] > row["OBV_MA20"]
     conditions["OBV > MA20 (presion compradora)"] = obv_bull
-    score += 1 if obv_bull else -1
+
+    # Si ADX > 40, el OBV pesa menos (la tendencia macro manda)
+    adx_for_weight = float(adx_value) if pd.notna(adx_value) else 0
+    obv_weight = 0.5 if adx_for_weight > 40 else 1.0
+    score += obv_weight if obv_bull else -obv_weight
 
     # Divergencias OBV — 2 puntos (mas confiable que RSI por usar volumen real)
+    # Igual: reducido a 1 si ADX > 40 (tendencia macro debe pesar mas)
     obv_div = detect_obv_divergence(df)
     conditions["Divergencia OBV alcista (acumulacion)"] = obv_div["bullish"]
     conditions["Divergencia OBV bajista (distribucion)"] = obv_div["bearish"]
+    div_weight = 1.0 if adx_for_weight > 40 else 2.0
     if obv_div["bullish"]:
-        score += 2
+        score += div_weight
     elif obv_div["bearish"]:
-        score -= 2
+        score -= div_weight
 
     # Volumen fuerte — 1 punto (solo premia, no penaliza)
     vol_strong = False
@@ -465,72 +627,103 @@ def calculate_score(df: pd.DataFrame) -> dict:
     }
 
 
+def get_adaptive_threshold(adx: float) -> int:
+    """
+    Umbral dinamico segun fuerza de tendencia (ADX).
+
+    Logica: cuando el mercado grita en una direccion, no necesitamos 9 puntos
+    para entrar. Cuando esta indeciso, somos mas estrictos.
+
+    - ADX > 40: tendencia extremadamente fuerte → umbral 7 (no perder el move)
+    - ADX 30-40: tendencia clara              → umbral 9 (base)
+    - ADX 20-30: tendencia debil               → umbral 10 (mas estricto)
+    - ADX < 20: lateral                        → umbral 12 (muy estricto)
+    """
+    if pd.isna(adx) or adx == 0:
+        return 12  # sin datos = maximo cuidado
+    if adx > 40:
+        return 7
+    if adx >= 30:
+        return 9
+    if adx >= 20:
+        return 10
+    return 12
+
+
 # ── Señal final (incluye confirmacion 1H y filtros multi-timeframe) ──────────
 
-def get_signal(score: int, trend_1h: str, trend_1d: str, trend_1w: str,
-               market_trending: bool) -> dict:
+def get_signal(score: float, trend_1h: str, trend_1d: str, trend_1w: str,
+               market_trending: bool, adx: float = 0) -> dict:
     """
     Logica de señal con 4 filtros: ADX, 1W, 1D, 1H.
+    Umbral adaptativo segun fuerza de tendencia.
     """
     reasons = []
+    threshold = get_adaptive_threshold(adx)
 
     # Filtro 1: mercado en tendencia
     if not market_trending:
         return {"signal": "NEUTRAL",
                 "reason": "Mercado lateral (ADX < 25)",
-                "confidence": "—"}
+                "confidence": "—",
+                "threshold_used": threshold}
 
     # Direccion segun score
-    if score >= SIGNAL_THRESHOLD:
+    if score >= threshold:
         raw = "LONG"
-    elif score <= -SIGNAL_THRESHOLD:
+    elif score <= -threshold:
         raw = "SHORT"
     else:
         return {"signal": "NEUTRAL",
-                "reason": f"Score insuficiente ({score}, umbral {SIGNAL_THRESHOLD})",
-                "confidence": "—"}
+                "reason": f"Score insuficiente ({score:.1f}, umbral {threshold} para ADX={adx:.1f})",
+                "confidence": "—",
+                "threshold_used": threshold}
 
     # Filtro 2: tendencia 1W
     if raw == "LONG" and trend_1w == "BAJISTA":
         return {"signal": "NEUTRAL",
                 "reason": "Contra tendencia semanal (BAJISTA)",
-                "confidence": "—"}
+                "confidence": "—",
+                "threshold_used": threshold}
     if raw == "SHORT" and trend_1w == "ALCISTA":
         return {"signal": "NEUTRAL",
                 "reason": "Contra tendencia semanal (ALCISTA)",
-                "confidence": "—"}
+                "confidence": "—",
+                "threshold_used": threshold}
 
     # Filtro 3: tendencia 1D
     if raw == "LONG" and trend_1d == "BAJISTA":
         return {"signal": "NEUTRAL",
                 "reason": "Contra tendencia diaria",
-                "confidence": "—"}
+                "confidence": "—",
+                "threshold_used": threshold}
     if raw == "SHORT" and trend_1d == "ALCISTA":
         return {"signal": "NEUTRAL",
                 "reason": "Contra tendencia diaria",
-                "confidence": "—"}
+                "confidence": "—",
+                "threshold_used": threshold}
 
     # Filtro 4: confirmacion 1H
     target = "ALCISTA" if raw == "LONG" else "BAJISTA"
     confirms_1h = trend_1h == target
 
-    # Calculo de confianza
+    # Calculo de confianza (relativo al umbral usado)
     abs_score = abs(score)
     aligned_1d_1w = (trend_1d == trend_1w) and trend_1d in ("ALCISTA", "BAJISTA")
 
-    if abs_score >= 10 and aligned_1d_1w and confirms_1h:
+    # Score excepcional (1.3× umbral) + alineacion + confirmacion = ALTA
+    if abs_score >= threshold * 1.3 and aligned_1d_1w and confirms_1h:
         confidence = "ALTA"
-    elif abs_score >= 8 and confirms_1h:
+    elif abs_score >= threshold and confirms_1h:
         confidence = "MEDIA"
-    elif abs_score >= 8:
-        confidence = "BAJA"
-        reasons.append("1H no confirma — esperar timing")
     else:
         confidence = "BAJA"
+        reasons.append("1H no confirma — esperar timing")
 
     return {"signal": raw,
             "reason": " | ".join(reasons) if reasons else "",
-            "confidence": confidence}
+            "confidence": confidence,
+            "threshold_used": threshold}
 
 
 # ── Señal de cierre (logica de ESTADO, no de cruce momentaneo) ───────────────
@@ -655,10 +848,27 @@ def analyze(name: str, symbol: str) -> dict:
         trend_1w = get_trend(df_1w.iloc[-2])
 
         score_data = calculate_score(df_4h)
+        adx_val = score_data["adx"] or 0
+
+        # Funding rate (Binance) - sentimiento de perpetuos
+        funding = fetch_funding_rate(name)
+
+        # Aplicar ajuste de funding al score si esta disponible
+        if funding.get("available") and funding.get("score_adj"):
+            score_data["score"] += funding["score_adj"]
+            # Marcar la condicion para visibilidad
+            if funding["score_adj"] > 0:
+                score_data["conditions"]["Funding bajista extremo (sobreventa emocional)"] = True
+            else:
+                score_data["conditions"]["Funding alcista extremo (sobrecompra emocional)"] = True
+
         signal_data = get_signal(
             score_data["score"], trend_1h, trend_1d, trend_1w,
-            score_data["market_trending"]
+            score_data["market_trending"], adx_val
         )
+
+        # Régimen del mercado (diagnóstico independiente de la señal)
+        regime_data = get_regime(trend_1w, trend_1d, trend_1h, adx_val)
 
         levels = get_levels(df_4h)
         pivots = calculate_pivots(df_4h)
@@ -675,11 +885,16 @@ def analyze(name: str, symbol: str) -> dict:
             "name": name,
             "symbol": symbol,
             "price": price,
-            "score": score_data["score"],
+            "score": round(score_data["score"], 1),
             "max_score": score_data["max_score"],
             "signal": signal_data["signal"],
             "signal_reason": signal_data["reason"],
             "confidence": signal_data["confidence"],
+            "threshold_used": signal_data.get("threshold_used", SIGNAL_THRESHOLD),
+            "regime": regime_data["regime"],
+            "regime_description": regime_data["description"],
+            "regime_bias": regime_data["bias"],
+            "regime_strength": regime_data["strength_score"],
             "trend_1h": trend_1h,
             "trend_1d": trend_1d,
             "trend_1w": trend_1w,
@@ -693,6 +908,7 @@ def analyze(name: str, symbol: str) -> dict:
             "obv_divergence": score_data["obv_divergence"],
             "bb_squeeze": score_data["bb_squeeze"],
             "warnings": score_data["warnings"],
+            "funding": funding,
             "rsi6":  round(float(last["RSI6"]), 1)  if pd.notna(last["RSI6"])  else None,
             "rsi14": round(float(last["RSI14"]), 1) if pd.notna(last["RSI14"]) else None,
             "rsi20": round(float(last["RSI20"]), 1) if pd.notna(last["RSI20"]) else None,
@@ -721,12 +937,78 @@ def analyze(name: str, symbol: str) -> dict:
         return {"name": name, "symbol": symbol, "error": str(e)}
 
 
+def apply_btc_correlation(results: list) -> list:
+    """
+    Filtro post-analisis: si BTC esta en bear/bull fuerte, ajusta las señales
+    de altcoins porque historicamente todos los altcoins siguen a BTC.
+
+    - BTC en SHORT con confianza ALTA → bloquea LONGs en alts (cambia a NEUTRAL)
+    - BTC en LONG con confianza ALTA  → bloquea SHORTs en alts
+    - BTC en regimen BEAR FUERTE      → degrada confianza de LONGs alt
+    - BTC en regimen BULL FUERTE      → degrada confianza de SHORTs alt
+    """
+    btc = next((r for r in results if r.get("name") == "BTC" and not r.get("error")), None)
+    if not btc:
+        return results  # sin BTC, no aplicamos filtro
+
+    btc_signal = btc.get("signal", "NEUTRAL")
+    btc_conf   = btc.get("confidence", "—")
+    btc_regime = btc.get("regime", "LATERAL")
+
+    for r in results:
+        if r.get("name") == "BTC" or r.get("error"):
+            continue
+
+        # Caso 1: bloqueo total — BTC señal fuerte contra señal de altcoin
+        if "SHORT" in btc_signal and btc_conf in ("ALTA", "MEDIA") and "LONG" in r["signal"]:
+            r["btc_filter_applied"] = True
+            r["btc_filter_reason"] = f"BTC en SHORT ({btc_conf}) — alts no rompen contra BTC"
+            r["signal_original"] = r["signal"]
+            r["confidence_original"] = r["confidence"]
+            r["signal"] = "NEUTRAL"
+            r["confidence"] = "—"
+            r["signal_reason"] = (r.get("signal_reason", "") + f" | {r['btc_filter_reason']}").strip(" |")
+            continue
+
+        if "LONG" in btc_signal and btc_conf in ("ALTA", "MEDIA") and "SHORT" in r["signal"]:
+            r["btc_filter_applied"] = True
+            r["btc_filter_reason"] = f"BTC en LONG ({btc_conf}) — alts no rompen contra BTC"
+            r["signal_original"] = r["signal"]
+            r["confidence_original"] = r["confidence"]
+            r["signal"] = "NEUTRAL"
+            r["confidence"] = "—"
+            r["signal_reason"] = (r.get("signal_reason", "") + f" | {r['btc_filter_reason']}").strip(" |")
+            continue
+
+        # Caso 2: degradacion de confianza — BTC regimen contrario a la señal del alt
+        if "BEAR FUERTE" in btc_regime and "LONG" in r["signal"]:
+            if r["confidence"] == "ALTA":
+                r["confidence"] = "MEDIA"
+            elif r["confidence"] == "MEDIA":
+                r["confidence"] = "BAJA"
+            r["btc_filter_applied"] = True
+            r["btc_filter_reason"] = "BTC en bear fuerte — confianza degradada"
+
+        if "BULL FUERTE" in btc_regime and "SHORT" in r["signal"]:
+            if r["confidence"] == "ALTA":
+                r["confidence"] = "MEDIA"
+            elif r["confidence"] == "MEDIA":
+                r["confidence"] = "BAJA"
+            r["btc_filter_applied"] = True
+            r["btc_filter_reason"] = "BTC en bull fuerte — confianza degradada"
+
+    return results
+
+
 def run_analysis() -> list:
     results = []
     for name, symbol in SYMBOLS.items():
         print(f"  Analizando {name}...")
         results.append(analyze(name, symbol))
         time.sleep(1)
+
+    # Aplicar filtro de correlacion con BTC (ajusta señales de altcoins)
+    results = apply_btc_correlation(results)
     return results
 
 

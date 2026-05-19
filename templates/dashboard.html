@@ -393,11 +393,35 @@ function fmt(n) { return n != null ? Number(n).toLocaleString(undefined, {maximu
 
 // ── Señales ──────────────────────────────────────────────────────────────────
 
+function regimeColor(regime) {
+  if (!regime) return '#8b949e';
+  if (regime.includes('BULL FUERTE')) return '#2ea043';
+  if (regime.includes('BULL')) return '#56d364';
+  if (regime.includes('BEAR FUERTE')) return '#da3633';
+  if (regime.includes('BEAR')) return '#f85149';
+  if (regime.includes('TRANSICIÓN')) return '#f0b429';
+  return '#8b949e';
+}
+
+function fundingColor(impact) {
+  if (impact === 'BEARISH') return '#da3633';
+  if (impact === 'BULLISH') return '#2ea043';
+  return '#8b949e';
+}
+
 function renderCard(r) {
   if (r.error) return `<div class="card"><div style="color:#da3633">${r.name}: ${r.error}</div></div>`;
   const sc = sigClass(r.signal), bc = badgeClass(r.signal), fc = fillClass(r.signal);
   const sw = scoreWidth(r.score, r.max_score);
   const isLong = r.signal?.includes('LONG'), isShort = r.signal?.includes('SHORT');
+
+  // REGIMEN del mercado (siempre visible, da contexto incluso en NEUTRAL)
+  const regimeHtml = r.regime ? `<div style="background:#0d1117;border-left:3px solid ${regimeColor(r.regime)};padding:8px 12px;border-radius:4px;margin-bottom:12px">
+    <div style="font-size:0.65rem;color:#8b949e;text-transform:uppercase;margin-bottom:3px">Régimen del mercado</div>
+    <div style="font-size:0.95rem;font-weight:700;color:${regimeColor(r.regime)}">${r.regime}</div>
+    <div style="font-size:0.72rem;color:#8b949e;margin-top:3px">${r.regime_description || ''}</div>
+    <div style="font-size:0.72rem;color:#e6edf3;margin-top:4px;font-style:italic">${r.regime_bias || ''}</div>
+  </div>` : '';
 
   const trendsHtml = `<div class="trends-row">
     <span class="trend-pill ${trendClass(r.trend_1w)}">1W: ${r.trend_1w || '—'}</span>
@@ -408,7 +432,23 @@ function renderCard(r) {
   const adxHtml = r.adx != null ? `<div class="adx-row">
     <span class="adx-label">ADX:</span>
     <span class="adx-value ${adxClass(r.adx)}">${r.adx}</span>
-    <span style="margin-left:auto;font-size:0.7rem;color:#8b949e">${r.market_trending ? 'Tendencia clara' : 'Mercado lateral'}</span>
+    <span style="margin-left:8px;font-size:0.7rem;color:#8b949e">${r.market_trending ? 'Tendencia clara' : 'Mercado lateral'}</span>
+    <span style="margin-left:auto;font-size:0.7rem;color:#8b949e">Umbral: ±${r.threshold_used || 9}</span>
+  </div>` : '';
+
+  // Funding rate (sentimiento de perpetuos)
+  const fundingHtml = r.funding?.available ? `<div style="background:#0d1117;border-radius:6px;padding:7px 10px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+    <div>
+      <span style="font-size:0.7rem;color:#8b949e">Funding rate (Binance):</span>
+      <span style="font-size:0.85rem;font-weight:600;color:${fundingColor(r.funding.signal_impact)};margin-left:6px">${r.funding.rate > 0 ? '+' : ''}${r.funding.rate}%</span>
+    </div>
+    <div style="font-size:0.7rem;color:${fundingColor(r.funding.signal_impact)}">${r.funding.sentiment}</div>
+  </div>` : '';
+
+  // Filtro BTC aplicado
+  const btcFilterHtml = r.btc_filter_applied ? `<div style="background:#2d2100;border:1px solid #bb8009;color:#f0b429;border-radius:6px;padding:7px 10px;margin-bottom:10px;font-size:0.75rem">
+    <strong>Filtro BTC:</strong> ${r.btc_filter_reason}
+    ${r.signal_original ? `<div style="margin-top:3px;color:#8b949e">Señal original: ${r.signal_original}</div>` : ''}
   </div>` : '';
 
   const warningsHtml = (r.warnings || []).map(w => `<div class="warning">${w}</div>`).join('');
@@ -416,8 +456,8 @@ function renderCard(r) {
   let divHtml = '';
   if (r.divergence?.bullish) divHtml += `<div class="div-alert">Divergencia RSI alcista (+3 puntos)</div>`;
   if (r.divergence?.bearish) divHtml += `<div class="div-alert bearish">Divergencia RSI bajista (-3 puntos)</div>`;
-  if (r.obv_divergence?.bullish) divHtml += `<div class="div-alert">Divergencia OBV alcista — acumulación detectada (+2 puntos)</div>`;
-  if (r.obv_divergence?.bearish) divHtml += `<div class="div-alert bearish">Divergencia OBV bajista — distribución detectada (-2 puntos)</div>`;
+  if (r.obv_divergence?.bullish) divHtml += `<div class="div-alert">Divergencia OBV alcista — acumulación detectada</div>`;
+  if (r.obv_divergence?.bearish) divHtml += `<div class="div-alert bearish">Divergencia OBV bajista — distribución detectada</div>`;
   if (r.bb_squeeze) divHtml += `<div class="alert-rsi">Bollinger Squeeze — movimiento próximo</div>`;
   if (r.rsi6_oversold) divHtml += `<div class="alert-rsi">RSI(6) sobreventa (${r.rsi6})</div>`;
   if (r.rsi6_overbought) divHtml += `<div class="alert-rsi">RSI(6) sobrecompra (${r.rsi6})</div>`;
@@ -505,8 +545,11 @@ function renderCard(r) {
       </div>
     </div>
     ${r.signal_reason ? `<div class="signal-reason">${r.signal_reason}</div>` : ''}
+    ${regimeHtml}
+    ${btcFilterHtml}
     ${trendsHtml}
     ${adxHtml}
+    ${fundingHtml}
     <div class="score-section">
       <div class="score-label"><span>Score</span><span>${r.score > 0 ? '+' : ''}${r.score} / ${r.max_score}</span></div>
       <div class="score-bar"><div class="score-fill ${fc}" style="width:${sw}%"></div></div>

@@ -82,6 +82,10 @@ def format_signal_message(result: dict) -> str:
         f"Confianza: {confidence}",
         f"Score: {score}/{max_s} | Precio: {fmt_price(price)}",
         "",
+        f"RÉGIMEN: {result.get('regime', '—')}",
+        f"  {result.get('regime_description', '')}",
+        f"  Bias: {result.get('regime_bias', '—')}",
+        "",
         "TENDENCIAS MULTI-TIMEFRAME:",
         f"  1W: {result.get('trend_1w', '—')}",
         f"  1D: {result.get('trend_1d', '—')}",
@@ -93,6 +97,12 @@ def format_signal_message(result: dict) -> str:
         f"  MACD hist: {result['macd_hist']}",
         f"  OBV trend: {result.get('obv_trend', '—')}",
     ]
+
+    # Funding rate (sentimiento perpetuos)
+    funding = result.get("funding", {})
+    if funding.get("available"):
+        rate = funding.get("rate", 0)
+        lines.append(f"  Funding: {rate:+.4f}% ({funding.get('sentiment', '—')})")
 
     # Divergencias - alta confiabilidad
     div = result.get("divergence", {})
