@@ -1,0 +1,38 @@
+# Configuración sensible
+config.json
+
+# Bases de datos
+data/
+*.db
+*.db-journal
+
+# Cache y logs
+*.log
+last_results.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
