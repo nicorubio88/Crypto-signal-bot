@@ -1,13 +1,14 @@
-# Crypto Signal Bot v3.0
+# Crypto Signal Bot v3.1
 
 Sistema de señales automatizado para crypto perpetuos (BTC, ETH, SOL, XRP).
 Motor de análisis técnico multi-timeframe con detección de régimen del mercado,
-funding rate de perpetuos, filtro de correlación BTC y gestión integrada de operaciones.
+funding rate de perpetuos (multi-fuente), filtro de correlación BTC, lectura en
+lenguaje claro, escenarios condicionales y gestión integrada de operaciones.
 
 ## Stack
 - **Python 3.11+**
 - **Kraken API pública** (sin autenticación, datos OHLC)
-- **Binance Futures API pública** (funding rate, fallback graceful)
+- **Funding rate multi-fuente**: Binance → Bybit → OKX (cascada con fallback)
 - **pandas + pandas-ta** (indicadores técnicos)
 - **Flask** (dashboard web)
 - **APScheduler** (análisis cada 4h, alertas cada 2min)
@@ -16,11 +17,18 @@ funding rate de perpetuos, filtro de correlación BTC y gestión integrada de op
 
 ---
 
-## Características v3.0
+## Características v3.1
 
-### Nuevo en v3.0
+### Nuevo en v3.1
+- **Resumen en lenguaje claro**: cada activo y el mercado global traducidos a 2-3 frases interpretables (no es predicción, traduce los indicadores)
+- **Escenarios y lectura multi-timeframe**: panel plegable con jerarquía de capas (fondo 1W manda, timing 1H da entrada) + escenarios condicionales sobre niveles reales + qué timeframe vigilar
+- **Funding rate multi-fuente**: cascada Binance → Bybit → OKX para resistir bloqueos regionales
+- **Alerta de cambio de régimen**: avisa por Telegram cuando un activo cambia de dirección de régimen (con o sin posición abierta), incluyendo aviso de cierre si corresponde
+- **Endpoint `/api/evolution`**: reporte completo de acertividad por tipo de señal, confianza, régimen y activo (para análisis de evolución)
+- **Tracking ampliado**: cada señal guarda confianza, régimen, ADX y umbral usado
+
+### Heredado de v3.0
 - **Régimen del mercado**: clasificación independiente de la señal (BULL FUERTE / BULL / BULL DÉBIL / LATERAL / BEAR DÉBIL / BEAR / BEAR FUERTE / TRANSICIÓN)
-- **Funding rate**: sentimiento real de perpetuos desde Binance Futures
 - **Umbral adaptativo**: el umbral de señal cambia según fuerza de tendencia (ADX)
 - **Filtro de correlación BTC**: bloquea señales de altcoins contrarias a BTC
 
@@ -30,6 +38,13 @@ funding rate de perpetuos, filtro de correlación BTC y gestión integrada de op
 - **Sistema de scoring ponderado**: ±17 puntos, umbral adaptativo según ADX
 - **Análisis multi-timeframe**: 1W → 1D → 4H → 1H con confirmación
 - **Filtros anti-trampa**: ADX obligatorio, EMA200 para evitar bear/bull rallies
+
+### Endpoints API
+- `/api/data` — análisis actual de los 4 activos + resumen global
+- `/api/stats` — win rate por activo y timeframe
+- `/api/evolution` — reporte completo de evolución (acertividad por señal/confianza/régimen)
+- `/api/signals` — historial de señales
+- `/api/operations/*` — gestión de operaciones
 
 ### Dashboard interactivo
 4 pestañas:

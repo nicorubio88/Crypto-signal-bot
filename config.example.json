@@ -1,0 +1,9 @@
+{
+  "telegram_token": "TU_TOKEN_DE_BOTFATHER",
+  "telegram_chat_id": "TU_CHAT_ID",
+  "capital_disponible": 10000,
+  "risk_pct": 0.025,
+  "full_analysis_interval_hours": 4,
+  "ops_check_interval_minutes": 2,
+  "win_threshold_pct": 0.3
+}

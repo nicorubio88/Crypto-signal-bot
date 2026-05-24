@@ -6,9 +6,9 @@ import json
 import numpy as np
 from flask import Flask, render_template, Response, request
 from apscheduler.schedulers.background import BackgroundScheduler
-from engine import run_analysis
-from telegram_bot import notify_if_signal, format_signal_message, send_message
-from tracker import save_signal, update_outcomes, get_stats, get_all_signals
+from engine import run_analysis, build_global_summary
+from telegram_bot import notify_if_signal, format_signal_message, send_message, format_regime_change_message
+from tracker import save_signal, update_outcomes, get_stats, get_all_signals, get_evolution_report
 from operations import (
     create_operation, close_operation, update_levels,
     get_open_operations, get_closed_operations,
@@ -25,7 +25,9 @@ CACHE_PATH  = Path(__file__).parent / "data" / "last_results.json"
 state = {
     "results": [],
     "last_update": None,
+    "global_summary": None,  # resumen global del mercado (4 activos)
     "last_signals": {},
+    "last_regimes": {},  # tracking de regimen anterior por activo (cambio de regimen)
     "operation_alerts_sent": {},  # tracking de alertas ya enviadas por operacion
 }
 
@@ -92,6 +94,17 @@ def check_operation_alerts(operations: list):
             sent.add("close_high")
 
 
+def regime_direction(regime: str) -> str:
+    """Agrupa los 9 regimenes en 3 direcciones para detectar cambios significativos."""
+    if not regime:
+        return "NEUTRO"
+    if "BULL" in regime:
+        return "ALCISTA"
+    if "BEAR" in regime:
+        return "BAJISTA"
+    return "NEUTRO"  # LATERAL, LATERAL ESTRICTO, TRANSICIÓN
+
+
 def refresh_data():
     """Analisis completo: indicadores + scoring + señales. Ciclo lento (4h)."""
     print(f"\n[{datetime.now().strftime('%H:%M UTC')}] Actualizando datos...")
@@ -112,12 +125,27 @@ def refresh_data():
             print(f"  Nueva señal: {name} -> {signal}")
             state["last_signals"][name] = signal
 
+        # ── Alerta general de cambio de regimen (con o sin posicion abierta) ──
+        regime = r.get("regime", "")
+        prev_regime = state["last_regimes"].get(name)
+        new_dir = regime_direction(regime)
+        prev_dir = regime_direction(prev_regime) if prev_regime else None
+
+        # Solo avisa si la DIRECCION cambio (evita ruido tipo BEAR -> BEAR DÉBIL).
+        # No avisa en el primer ciclo (prev_regime None) para no spammear al arrancar.
+        if prev_regime is not None and prev_dir != new_dir:
+            send_message(format_regime_change_message(r, prev_regime))
+            print(f"  Cambio de regimen: {name} {prev_regime} -> {regime}")
+
+        state["last_regimes"][name] = regime
+
     CACHE_PATH.parent.mkdir(exist_ok=True)
     with open(CACHE_PATH, "w") as f:
         json.dump(clean, f, indent=2)
 
     state["results"] = clean
     state["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
+    state["global_summary"] = build_global_summary(clean)
 
     # Chequear operaciones abiertas y enviar alertas
     open_ops = get_open_operations()
@@ -184,6 +212,7 @@ def api_data():
     return Response(json.dumps(sanitize({
         "results": state["results"],
         "last_update": state["last_update"],
+        "global_summary": state["global_summary"],
         "config": {
             "capital": load_config().get("capital_disponible", 10000),
             "risk_pct": load_config().get("risk_pct", 0.025),
@@ -201,6 +230,13 @@ def api_refresh():
 @app.route("/api/stats")
 def api_stats():
     return Response(json.dumps(sanitize(get_stats())), mimetype="application/json")
+
+
+@app.route("/api/evolution")
+def api_evolution():
+    """Reporte completo de evolucion del bot — pensado para analisis."""
+    return Response(json.dumps(sanitize(get_evolution_report()), indent=2),
+                    mimetype="application/json")
 
 
 @app.route("/api/signals")

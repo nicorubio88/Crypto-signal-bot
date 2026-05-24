@@ -30,13 +30,18 @@ SYMBOLS = {
 KRAKEN_URL = "https://api.kraken.com/0/public/OHLC"
 KRAKEN_INTERVALS = {"1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
 
-# Funding rate de Binance Futures USDT-M (publico, sin auth)
+# Funding rate - multiples fuentes con fallback en cascada
+# Todos los exchanges pagan funding cada 8h y reportan el rate del periodo actual.
 BINANCE_FUNDING_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
-BINANCE_FUNDING_SYMBOLS = {
-    "BTC": "BTCUSDT",
-    "ETH": "ETHUSDT",
-    "SOL": "SOLUSDT",
-    "XRP": "XRPUSDT",
+BYBIT_FUNDING_URL = "https://api.bybit.com/v5/market/tickers"
+OKX_FUNDING_URL = "https://www.okx.com/api/v5/public/funding-rate"
+
+# Simbolos por exchange (cada uno usa su propia nomenclatura)
+FUNDING_SYMBOLS = {
+    "BTC": {"binance": "BTCUSDT", "bybit": "BTCUSDT", "okx": "BTC-USDT-SWAP"},
+    "ETH": {"binance": "ETHUSDT", "bybit": "ETHUSDT", "okx": "ETH-USDT-SWAP"},
+    "SOL": {"binance": "SOLUSDT", "bybit": "SOLUSDT", "okx": "SOL-USDT-SWAP"},
+    "XRP": {"binance": "XRPUSDT", "bybit": "XRPUSDT", "okx": "XRP-USDT-SWAP"},
 }
 
 # Score maximo teorico (suma de todos los pesos positivos)
@@ -71,76 +76,112 @@ def fetch_candles(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
 
 # ── Fetch funding rate (Binance Futures - sentimiento de perpetuos) ──────────
 
+# ── Fetch funding rate (multi-fuente con fallback) ───────────────────────────
+
+def _fetch_binance_funding(symbol: str) -> float:
+    """Devuelve funding rate en porcentaje (8h). Lanza excepcion si falla."""
+    resp = requests.get(BINANCE_FUNDING_URL, params={"symbol": symbol},
+                        timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+    if resp.status_code in (451, 403):
+        raise PermissionError(f"Binance bloqueado ({resp.status_code})")
+    resp.raise_for_status()
+    data = resp.json()
+    return float(data["lastFundingRate"]) * 100
+
+
+def _fetch_bybit_funding(symbol: str) -> float:
+    """Devuelve funding rate en porcentaje (8h). Lanza excepcion si falla."""
+    resp = requests.get(BYBIT_FUNDING_URL,
+                        params={"category": "linear", "symbol": symbol},
+                        timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+    if resp.status_code in (451, 403):
+        raise PermissionError(f"Bybit bloqueado ({resp.status_code})")
+    resp.raise_for_status()
+    data = resp.json()
+    lst = data.get("result", {}).get("list", [])
+    if not lst:
+        raise ValueError("Bybit sin datos")
+    return float(lst[0]["fundingRate"]) * 100
+
+
+def _fetch_okx_funding(symbol: str) -> float:
+    """Devuelve funding rate en porcentaje (8h). Lanza excepcion si falla."""
+    resp = requests.get(OKX_FUNDING_URL, params={"instId": symbol},
+                        timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+    if resp.status_code in (451, 403):
+        raise PermissionError(f"OKX bloqueado ({resp.status_code})")
+    resp.raise_for_status()
+    data = resp.json()
+    lst = data.get("data", [])
+    if not lst:
+        raise ValueError("OKX sin datos")
+    return float(lst[0]["fundingRate"]) * 100
+
+
+def _classify_funding(rate_pct: float, source: str) -> dict:
+    """Clasifica un funding rate (en %, periodo 8h) en sentimiento + ajuste de score."""
+    if rate_pct > 0.10:
+        sentiment, signal_impact, score_adj = "EUFORIA ALCISTA", "BEARISH", -1
+    elif rate_pct > 0.05:
+        sentiment, signal_impact, score_adj = "Sobrecompra emocional", "BEARISH", -1
+    elif rate_pct < -0.10:
+        sentiment, signal_impact, score_adj = "CAPITULACIÓN BAJISTA", "BULLISH", 1
+    elif rate_pct < -0.05:
+        sentiment, signal_impact, score_adj = "Sobreventa emocional", "BULLISH", 1
+    else:
+        sentiment, signal_impact, score_adj = "Neutral", "NEUTRAL", 0
+
+    return {
+        "rate": round(rate_pct, 4),
+        "rate_annualized": round(rate_pct * 3 * 365, 2),  # 3 periodos/dia × 365
+        "sentiment": sentiment,
+        "signal_impact": signal_impact,
+        "score_adj": score_adj,
+        "source": source,
+        "available": True,
+    }
+
+
 def fetch_funding_rate(asset: str) -> dict:
     """
-    Funding rate de Binance USDT-M perpetuos. Indicador de sentimiento real:
+    Funding rate de perpetuos. Indicador de sentimiento real del mercado.
 
-    - Funding POSITIVO: longs pagan a shorts → mercado sobrecomprado emocionalmente
-      * > 0.05% (8h)  → señal de saturación alcista, posible reversión bajista
-      * > 0.10% (8h)  → muy sobrecomprado, alta probabilidad de corrección
+    - Funding POSITIVO: longs pagan a shorts → sobrecomprado emocionalmente
+      * > 0.10% (8h)  → euforia, alta probabilidad de correccion (bearish)
+      * > 0.05% (8h)  → sobrecompra emocional (bearish)
+    - Funding NEGATIVO: shorts pagan a longs → sobrevendido emocionalmente
+      * < -0.10% (8h) → capitulacion, alta probabilidad de rebote (bullish)
+      * < -0.05% (8h) → sobreventa emocional (bullish)
 
-    - Funding NEGATIVO: shorts pagan a longs → mercado sobrevendido emocionalmente
-      * < -0.05% (8h) → señal de capitulación, posible rebote alcista
-      * < -0.10% (8h) → muy sobrevendido, alta probabilidad de rebote
-
-    Binance cobra/paga funding cada 8h. Los valores aqui son por periodo (8h).
-
-    Fallback: si Binance bloquea (error 451 en algunos hosts), devuelve None
-    y el sistema sigue funcionando sin este indicador.
+    Fallback en cascada: Binance → Bybit → OKX. Si los 3 fallan (raro),
+    devuelve available=False y el sistema sigue funcionando sin este indicador.
     """
-    symbol = BINANCE_FUNDING_SYMBOLS.get(asset)
-    if not symbol:
+    symbols = FUNDING_SYMBOLS.get(asset)
+    if not symbols:
         return {"rate": None, "available": False, "reason": "Asset no soportado"}
 
-    try:
-        resp = requests.get(
-            BINANCE_FUNDING_URL,
-            params={"symbol": symbol},
-            timeout=10,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-        # 451: bloqueo legal regional | 403: bloqueo por geo o WAF
-        if resp.status_code in (451, 403):
-            return {"rate": None, "available": False, "reason": f"Binance bloqueado ({resp.status_code})"}
-        resp.raise_for_status()
-        data = resp.json()
+    # Cascada de fuentes: el primero que responda gana
+    sources = [
+        ("binance", _fetch_binance_funding, symbols["binance"]),
+        ("bybit",   _fetch_bybit_funding,   symbols["bybit"]),
+        ("okx",     _fetch_okx_funding,     symbols["okx"]),
+    ]
 
-        # lastFundingRate viene como decimal, ej. 0.0001 = 0.01% por periodo de 8h
-        rate = float(data.get("lastFundingRate", 0))
-        rate_pct = rate * 100  # convertir a porcentaje
+    errors = []
+    for name, fetcher, symbol in sources:
+        try:
+            rate_pct = fetcher(symbol)
+            return _classify_funding(rate_pct, name)
+        except Exception as e:
+            errors.append(f"{name}: {str(e)[:30]}")
+            continue
 
-        # Clasificacion
-        if rate_pct > 0.10:
-            sentiment = "EUFORIA ALCISTA"
-            signal_impact = "BEARISH"  # contra-señal
-            score_adj = -1
-        elif rate_pct > 0.05:
-            sentiment = "Sobrecompra emocional"
-            signal_impact = "BEARISH"
-            score_adj = -1
-        elif rate_pct < -0.10:
-            sentiment = "CAPITULACIÓN BAJISTA"
-            signal_impact = "BULLISH"  # contra-señal
-            score_adj = 1
-        elif rate_pct < -0.05:
-            sentiment = "Sobreventa emocional"
-            signal_impact = "BULLISH"
-            score_adj = 1
-        else:
-            sentiment = "Neutral"
-            signal_impact = "NEUTRAL"
-            score_adj = 0
-
-        return {
-            "rate": round(rate_pct, 4),
-            "rate_annualized": round(rate_pct * 3 * 365, 2),  # 3 periodos/dia × 365 dias
-            "sentiment": sentiment,
-            "signal_impact": signal_impact,
-            "score_adj": score_adj,
-            "available": True,
-        }
-    except Exception as e:
-        return {"rate": None, "available": False, "reason": f"Error: {str(e)[:50]}"}
+    # Los 3 fallaron
+    return {
+        "rate": None,
+        "available": False,
+        "reason": "Todas las fuentes fallaron — " + " | ".join(errors),
+    }
 
 
 # ── Calculo de indicadores ────────────────────────────────────────────────────
@@ -1000,6 +1041,333 @@ def apply_btc_correlation(results: list) -> list:
     return results
 
 
+def build_scenarios(r: dict) -> dict:
+    """
+    Genera lectura por capas (jerarquia multi-timeframe) + escenarios
+    condicionales con niveles reales + que timeframe vigilar.
+
+    Principio: el marco largo manda (fondo), el corto da timing. Un rebote 1H
+    dentro de un 1W bajista es una oscilacion subordinada, no un cambio de tendencia.
+
+    NO es prediccion: son condiciones determinadas por los niveles que el
+    mercado ya marco. Si pasa X (que el precio rompa un nivel real), entonces Y.
+    """
+    if r.get("error"):
+        return None
+
+    price = r.get("price")
+    if price is None:
+        return None
+
+    t1w = r.get("trend_1w", "LATERAL")
+    t1d = r.get("trend_1d", "LATERAL")
+    t1h = r.get("trend_1h", "LATERAL")
+    regime = r.get("regime", "")
+
+    # ── Capas (jerarquia) ─────────────────────────────────────────────────
+    def label(tf):
+        return {"ALCISTA": "alcista", "BAJISTA": "bajista", "LATERAL": "lateral"}.get(tf, "—")
+
+    layers = {
+        "fondo":      {"tf": "1W", "trend": label(t1w), "rol": "la marea grande, marca la dirección dominante"},
+        "estructura": {"tf": "1D", "trend": label(t1d), "rol": "el medio plazo, confirma o frena al fondo"},
+        "timing":     {"tf": "1H", "trend": label(t1h), "rol": "el corto plazo, da el momento de entrada"},
+    }
+
+    # ── Interpretacion de la jerarquia ────────────────────────────────────
+    interpretacion = ""
+    if t1w == "BAJISTA" and t1h == "ALCISTA":
+        if t1d == "BAJISTA":
+            interpretacion = ("El fondo es claramente bajista y el rebote de corto plazo va contra esa marea: "
+                              "lo más probable es que sea una oscilación temporal (rebote técnico) dentro de la caída mayor, "
+                              "no un cambio de dirección.")
+        else:
+            interpretacion = ("Fondo bajista con un rebote de corto plazo en curso. Mientras el medio plazo (1D) no gire alcista, "
+                              "el rebote sigue siendo subordinado a la tendencia bajista mayor.")
+    elif t1w == "ALCISTA" and t1h == "BAJISTA":
+        if t1d == "ALCISTA":
+            interpretacion = ("El fondo es claramente alcista y la baja de corto plazo va contra esa marea: "
+                              "lo más probable es que sea una corrección temporal dentro de la subida mayor, no un cambio de dirección.")
+        else:
+            interpretacion = ("Fondo alcista con una corrección de corto plazo en curso. Mientras el medio plazo (1D) no gire bajista, "
+                              "la corrección sigue subordinada a la tendencia alcista mayor.")
+    elif t1w == t1d == t1h and t1w in ("ALCISTA", "BAJISTA"):
+        dir_txt = "alcista" if t1w == "ALCISTA" else "bajista"
+        interpretacion = (f"Las tres capas están alineadas en dirección {dir_txt}: es la situación de mayor convicción, "
+                          f"el corto plazo confirma la tendencia de fondo.")
+    elif t1w == "LATERAL" and t1d == "LATERAL":
+        interpretacion = ("El fondo y el medio plazo están laterales: el mercado no tiene tendencia dominante. "
+                          "Los movimientos de corto plazo (1H) son ruido dentro de un rango hasta que el 1D defina dirección.")
+    else:
+        interpretacion = ("Las capas no están alineadas: el mercado está en transición. "
+                          "Conviene esperar a que el medio plazo (1D) defina hacia dónde se inclina antes de operar con la tendencia.")
+
+    # ── Escenarios condicionales con niveles reales ───────────────────────
+    # Junto todos los niveles relevantes y ubico el inmediato arriba/abajo
+    niveles = []
+    def add_level(val, nombre):
+        if val is not None and val > 0:
+            niveles.append((float(val), nombre))
+
+    piv = r.get("pivots", {})
+    add_level(r.get("ema20"), "EMA20")
+    add_level(r.get("ema50"), "EMA50")
+    add_level(r.get("vwap"), "VWAP")
+    add_level(piv.get("r1"), "pivot R1")
+    add_level(piv.get("r2"), "pivot R2")
+    add_level(piv.get("s1"), "pivot S1")
+    add_level(piv.get("s2"), "pivot S2")
+    add_level(r.get("bb_up"), "banda superior Bollinger")
+    add_level(r.get("bb_dn"), "banda inferior Bollinger")
+
+    arriba = sorted([n for n in niveles if n[0] > price * 1.0015], key=lambda x: x[0])
+    abajo = sorted([n for n in niveles if n[0] < price * 0.9985], key=lambda x: x[0], reverse=True)
+
+    def fmt(v):
+        return f"${v:,.2f}" if v >= 10 else f"${v:,.4f}"
+
+    escenarios = []
+
+    # Escenario alcista (ruptura del nivel inmediato superior)
+    if arriba:
+        nivel_val, nivel_nom = arriba[0]
+        dist = (nivel_val / price - 1) * 100
+        if t1w == "BAJISTA" or t1d == "BAJISTA":
+            consecuencia = ("el rebote ganaría fuerza y habría que ver si contagia al 1D para girarlo alcista — "
+                            "recién ahí el cambio de tendencia sería real, no solo un rebote")
+        elif t1w == "ALCISTA":
+            consecuencia = "la tendencia alcista de fondo se reforzaría y el avance tendría continuidad"
+        else:
+            consecuencia = "el mercado intentaría definir dirección al alza desde el rango actual"
+        escenarios.append({
+            "tipo": "alcista",
+            "texto": f"Si rompe y sostiene arriba de {fmt(nivel_val)} ({nivel_nom}, +{dist:.1f}%), {consecuencia}.",
+        })
+
+    # Escenario bajista (perdida del nivel inmediato inferior)
+    if abajo:
+        nivel_val, nivel_nom = abajo[0]
+        dist = (1 - nivel_val / price) * 100
+        if t1w == "ALCISTA" or t1d == "ALCISTA":
+            consecuencia = ("la corrección se profundizaría y habría que ver si contagia al 1D para girarlo bajista — "
+                            "recién ahí el cambio de tendencia sería real, no solo una corrección")
+        elif t1w == "BAJISTA":
+            consecuencia = "la tendencia bajista de fondo retomaría el control y la caída tendría continuidad"
+        else:
+            consecuencia = "el mercado intentaría definir dirección a la baja desde el rango actual"
+        escenarios.append({
+            "tipo": "bajista",
+            "texto": f"Si pierde {fmt(nivel_val)} ({nivel_nom}, -{dist:.1f}%), {consecuencia}.",
+        })
+
+    # ── Que timeframe vigilar ─────────────────────────────────────────────
+    if t1w == "BAJISTA" and t1h == "ALCISTA":
+        vigilar = ("Vigilá el 1D: es la bisagra. Si el 1D pasa de lateral/bajista a alcista, el rebote deja de ser "
+                   "oscilación y empieza a ser cambio de tendencia real.")
+    elif t1w == "ALCISTA" and t1h == "BAJISTA":
+        vigilar = ("Vigilá el 1D: es la bisagra. Si el 1D pasa de lateral/alcista a bajista, la corrección deja de ser "
+                   "temporal y empieza a ser cambio de tendencia real.")
+    elif t1w == t1d == t1h and t1w in ("ALCISTA", "BAJISTA"):
+        vigilar = ("Las tres capas ya están alineadas. Vigilá el 1H para timing de entrada y el ADX: "
+                   "si el ADX baja, la tendencia pierde fuerza.")
+    else:
+        vigilar = ("Vigilá el 1D: mientras siga lateral, el mercado no tiene dirección dominante y los movimientos "
+                   "de 1H son ruido dentro del rango.")
+
+    return {
+        "layers": layers,
+        "interpretacion": interpretacion,
+        "escenarios": escenarios,
+        "vigilar": vigilar,
+    }
+
+
+def build_asset_summary(r: dict) -> str:
+    """
+    Genera un resumen en lenguaje claro (2-3 frases) interpretando los
+    indicadores que ya tenemos. Es traduccion determinista, NO prediccion.
+
+    Estructura: [diagnostico de regimen] + [que lo confirma/contradice] +
+                [matiz accionable o de cautela].
+    """
+    if r.get("error"):
+        return "Sin datos suficientes para este activo."
+
+    regime = r.get("regime", "")
+    score = r.get("score", 0)
+    signal = r.get("signal", "NEUTRAL")
+    rsi6 = r.get("rsi6")
+    obv = r.get("obv_trend", "")
+    t1w, t1d, t1h = r.get("trend_1w"), r.get("trend_1d"), r.get("trend_1h")
+    bb_squeeze = r.get("bb_squeeze", False)
+    funding = r.get("funding", {})
+    obv_div = r.get("obv_divergence", {})
+    rsi_div = r.get("divergence", {})
+
+    frases = []
+
+    # ── Frase 1: diagnostico del regimen ──────────────────────────────────
+    if "BULL FUERTE" in regime:
+        frases.append("Tendencia alcista fuerte y alineada en todos los marcos temporales.")
+    elif "BULL" in regime:
+        frases.append("Mercado en tendencia alcista, con sesgo comprador predominante.")
+    elif "BEAR FUERTE" in regime:
+        frases.append("Tendencia bajista fuerte y alineada en todos los marcos temporales.")
+    elif "BEAR" in regime:
+        frases.append("Mercado en tendencia bajista, con sesgo vendedor predominante.")
+    elif "TRANSICI" in regime:
+        # Detallar la transicion segun los timeframes
+        if t1w == "BAJISTA" and t1h == "ALCISTA":
+            frases.append("Estructura bajista de fondo con un rebote en curso en el corto plazo.")
+        elif t1w == "ALCISTA" and t1h == "BAJISTA":
+            frases.append("Estructura alcista de fondo con una corrección en curso en el corto plazo.")
+        else:
+            frases.append("Mercado en transición: los marcos temporales no están alineados.")
+    elif "LATERAL ESTRICTO" in regime:
+        frases.append("Mercado sin tendencia, rangeando con baja fuerza direccional.")
+    else:
+        frases.append("Mercado lateral, sin convicción clara en ninguna dirección.")
+
+    # ── Frase 2: que confirma o contradice ────────────────────────────────
+    confirmaciones = []
+    contradicciones = []
+
+    # OBV
+    if obv == "ALCISTA":
+        (confirmaciones if "BULL" in regime else contradicciones if "BEAR" in regime else confirmaciones).append("volumen comprador (OBV alcista)")
+    elif obv == "BAJISTA":
+        (confirmaciones if "BEAR" in regime else contradicciones if "BULL" in regime else contradicciones).append("volumen vendedor (OBV bajista)")
+
+    # Divergencias (señales de posible giro)
+    if obv_div.get("bullish"):
+        contradicciones.append("acumulación detectada (divergencia OBV alcista)")
+    if obv_div.get("bearish"):
+        contradicciones.append("distribución detectada (divergencia OBV bajista)")
+    if rsi_div.get("bullish"):
+        contradicciones.append("divergencia RSI alcista (posible piso)")
+    if rsi_div.get("bearish"):
+        contradicciones.append("divergencia RSI bajista (posible techo)")
+
+    # Funding (segun si apoya o contradice el regimen)
+    if funding.get("available"):
+        imp = funding.get("signal_impact")
+        sent = funding.get("sentiment", "").lower()
+        regime_alc = "BULL" in regime
+        regime_baj = "BEAR" in regime
+        if imp == "BULLISH":
+            # funding negativo = presion alcista latente
+            if regime_alc:
+                confirmaciones.append(f"funding negativo ({sent})")
+            else:
+                contradicciones.append(f"funding negativo ({sent})")
+        elif imp == "BEARISH":
+            # funding alto = presion bajista latente
+            if regime_baj:
+                confirmaciones.append(f"funding alto ({sent})")
+            else:
+                contradicciones.append(f"funding alto ({sent})")
+
+    if confirmaciones and not contradicciones:
+        frases.append(f"Lo confirma el {', '.join(confirmaciones)}.")
+    elif contradicciones and not confirmaciones:
+        frases.append(f"Pero hay señales en contra: {', '.join(contradicciones)}.")
+    elif confirmaciones and contradicciones:
+        frases.append(f"Señales mixtas: a favor {', '.join(confirmaciones)}; en contra {', '.join(contradicciones)}.")
+
+    # ── Frase 3: matiz accionable / cautela ───────────────────────────────
+    matiz = []
+    if "LONG" in signal:
+        matiz.append(f"El bot emite señal de COMPRA (confianza {r.get('confidence','').lower()}).")
+    elif "SHORT" in signal:
+        matiz.append(f"El bot emite señal de VENTA (confianza {r.get('confidence','').lower()}).")
+    else:
+        # No hay señal: explicar por que
+        if bb_squeeze:
+            matiz.append("Volatilidad comprimida (Bollinger Squeeze): se acerca un movimiento brusco, conviene esperar el quiebre.")
+        elif rsi6 is not None and rsi6 > 70 and ("BULL" in regime or t1h == "ALCISTA"):
+            matiz.append("El impulso de corto plazo está sobrecomprado (RSI6 alto): el avance puede estar maduro.")
+        elif rsi6 is not None and rsi6 < 30 and ("BEAR" in regime or t1h == "BAJISTA"):
+            matiz.append("El impulso de corto plazo está sobrevendido (RSI6 bajo): la caída puede estar madura.")
+        else:
+            matiz.append("Sin señal operativa: el balance de indicadores no alcanza el umbral, conviene esperar confirmación.")
+
+    frases.append(matiz[0])
+
+    return " ".join(frases)
+
+
+def build_global_summary(results: list) -> dict:
+    """
+    Resumen global del mercado combinando los 4 activos.
+    Se apoya en BTC como lider (los altcoins suelen seguirlo).
+    """
+    valid = [r for r in results if not r.get("error")]
+    if not valid:
+        return {"headline": "Sin datos", "detail": "No hay análisis disponible."}
+
+    btc = next((r for r in valid if r.get("name") == "BTC"), None)
+
+    # Contar direcciones de regimen
+    def direction(regime):
+        if "BULL" in (regime or ""): return "alcista"
+        if "BEAR" in (regime or ""): return "bajista"
+        return "neutro"
+
+    dirs = [direction(r.get("regime")) for r in valid]
+    n_alc = dirs.count("alcista")
+    n_baj = dirs.count("bajista")
+    n_neu = dirs.count("neutro")
+
+    # Señales activas
+    longs = [r["name"] for r in valid if "LONG" in r.get("signal", "")]
+    shorts = [r["name"] for r in valid if "SHORT" in r.get("signal", "")]
+
+    # Squeeze global
+    squeezes = [r["name"] for r in valid if r.get("bb_squeeze")]
+
+    # ── Headline ──────────────────────────────────────────────────────────
+    if n_baj >= 3:
+        headline = "Mercado predominantemente bajista"
+    elif n_alc >= 3:
+        headline = "Mercado predominantemente alcista"
+    elif n_neu >= 3:
+        headline = "Mercado lateral / en transición"
+    else:
+        headline = "Mercado mixto, sin consenso direccional"
+
+    # ── Detalle (2-3 frases) ──────────────────────────────────────────────
+    frases = []
+
+    # Frase BTC (lider)
+    if btc:
+        btc_dir = direction(btc.get("regime"))
+        btc_regime = btc.get("regime", "")
+        frases.append(f"BTC, que marca el ritmo, está en régimen {btc_regime} ({btc_dir}).")
+
+    # Frase reparto
+    reparto = []
+    if n_alc: reparto.append(f"{n_alc} alcista{'s' if n_alc>1 else ''}")
+    if n_baj: reparto.append(f"{n_baj} bajista{'s' if n_baj>1 else ''}")
+    if n_neu: reparto.append(f"{n_neu} neutro{'s' if n_neu>1 else ''}")
+    frases.append(f"De los 4 activos: {', '.join(reparto)}.")
+
+    # Frase señales / squeeze
+    if longs or shorts:
+        partes = []
+        if longs: partes.append(f"compra en {', '.join(longs)}")
+        if shorts: partes.append(f"venta en {', '.join(shorts)}")
+        frases.append(f"Señales activas: {'; '.join(partes)}.")
+    elif len(squeezes) >= 2:
+        frases.append(f"Sin señales activas, pero {len(squeezes)} activos tienen volatilidad comprimida ({', '.join(squeezes)}): posible movimiento brusco próximo.")
+    else:
+        frases.append("Sin señales operativas activas: el mercado no ofrece entradas de alta convicción ahora.")
+
+    return {
+        "headline": headline,
+        "detail": " ".join(frases),
+    }
+
+
 def run_analysis() -> list:
     results = []
     for name, symbol in SYMBOLS.items():
@@ -1009,6 +1377,13 @@ def run_analysis() -> list:
 
     # Aplicar filtro de correlacion con BTC (ajusta señales de altcoins)
     results = apply_btc_correlation(results)
+
+    # Generar resumen por activo (despues del filtro BTC para reflejar señal final)
+    for r in results:
+        if not r.get("error"):
+            r["summary"] = build_asset_summary(r)
+            r["scenarios"] = build_scenarios(r)
+
     return results
 
 

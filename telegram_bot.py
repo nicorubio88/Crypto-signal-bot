@@ -102,7 +102,9 @@ def format_signal_message(result: dict) -> str:
     funding = result.get("funding", {})
     if funding.get("available"):
         rate = funding.get("rate", 0)
-        lines.append(f"  Funding: {rate:+.4f}% ({funding.get('sentiment', '—')})")
+        src = funding.get("source", "")
+        src_label = f" [{src}]" if src else ""
+        lines.append(f"  Funding: {rate:+.4f}% ({funding.get('sentiment', '—')}){src_label}")
 
     # Divergencias - alta confiabilidad
     div = result.get("divergence", {})
@@ -142,6 +144,57 @@ def format_signal_message(result: dict) -> str:
         lines.append(f"  TP2 (40%): {fmt_price(tp2)}")
         lines.append(f"  TP3 (20%): {fmt_price(tp3)}")
         lines.append(f"  R/R ratio: 1:{rr}")
+
+    lines.append("")
+    lines.append(result.get("updated_at", ""))
+
+    return "\n".join(lines)
+
+
+def format_regime_change_message(result: dict, prev_regime: str) -> str:
+    """
+    Alerta de cambio de regimen del mercado (con o sin posicion abierta).
+    Sirve para monitorear giros del mercado aunque no se opere.
+    """
+    name = result.get("name", "?")
+    price = result.get("price", 0)
+    regime = result.get("regime", "—")
+
+    def fmt_price(p):
+        if p is None:
+            return "—"
+        if p >= 10:
+            return f"${p:,.2f}"
+        return f"${p:,.4f}"
+
+    lines = [
+        f"=== CAMBIO DE REGIMEN - {name}/USDT ===",
+        f"Precio: {fmt_price(price)}",
+        "",
+        f"ANTES:  {prev_regime}",
+        f"AHORA:  {regime}",
+        "",
+        result.get("regime_description", ""),
+        f"Bias: {result.get('regime_bias', '—')}",
+        "",
+        "TENDENCIAS:",
+        f"  1W: {result.get('trend_1w', '—')} | "
+        f"1D: {result.get('trend_1d', '—')} | "
+        f"1H: {result.get('trend_1h', '—')}",
+        f"  ADX: {result.get('adx', '—')} | Score: {result.get('score', '—')}/{result.get('max_score', 17)}",
+    ]
+
+    # Si ademas el bot sugiere cerrar una posicion en esta direccion, avisarlo
+    cl = result.get("close_long", {})
+    cs = result.get("close_short", {})
+    if cl.get("should_close") and cl.get("urgency") in ("MEDIA", "ALTA"):
+        lines.append("")
+        lines.append(f"AVISO: si tenes LONG, considerar cierre ({cl['urgency']})")
+        lines.append("  " + "; ".join(cl.get("reasons", [])))
+    if cs.get("should_close") and cs.get("urgency") in ("MEDIA", "ALTA"):
+        lines.append("")
+        lines.append(f"AVISO: si tenes SHORT, considerar cierre ({cs['urgency']})")
+        lines.append("  " + "; ".join(cs.get("reasons", [])))
 
     lines.append("")
     lines.append(result.get("updated_at", ""))

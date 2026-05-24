@@ -50,6 +50,10 @@ def init_db():
             rsi20       REAL,
             macd_hist   REAL,
             conditions  TEXT,
+            confidence  TEXT,
+            regime      TEXT,
+            adx         REAL,
+            threshold_used INTEGER,
             created_at  TEXT NOT NULL
         );
 
@@ -71,6 +75,14 @@ def init_db():
             FOREIGN KEY (signal_id) REFERENCES signals(id)
         );
     """)
+
+    # Migracion idempotente: agregar columnas nuevas si la DB es vieja
+    existing = [r[1] for r in conn.execute("PRAGMA table_info(signals)")]
+    for col, coltype in [("confidence", "TEXT"), ("regime", "TEXT"),
+                          ("adx", "REAL"), ("threshold_used", "INTEGER")]:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {coltype}")
+
     conn.commit()
     conn.close()
 
@@ -85,8 +97,9 @@ def save_signal(result: dict) -> int:
     conn = get_conn()
     cur = conn.execute("""
         INSERT INTO signals
-            (asset, signal, score, price_entry, trend_1d, rsi6, rsi20, macd_hist, conditions, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (asset, signal, score, price_entry, trend_1d, rsi6, rsi20, macd_hist,
+             conditions, confidence, regime, adx, threshold_used, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         result["name"],
         result["signal"],
@@ -97,6 +110,10 @@ def save_signal(result: dict) -> int:
         result.get("rsi20"),
         result.get("macd_hist"),
         json.dumps(result.get("conditions", {})),
+        result.get("confidence", ""),
+        result.get("regime", ""),
+        result.get("adx"),
+        result.get("threshold_used"),
         datetime.utcnow().isoformat(),
     ))
 
@@ -269,6 +286,97 @@ def get_all_signals(limit: int = 100) -> list:
     """, (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_evolution_report() -> dict:
+    """
+    Reporte completo de evolucion del bot, pensado para analisis.
+    Agrupa acertividad por tipo de señal, confianza y regimen.
+    Devuelve un dict resumido y facil de leer.
+    """
+    conn = get_conn()
+
+    def rate_for(where_clause: str, params: tuple, horizon: str) -> dict:
+        """Win rate para un subconjunto de señales en un horizonte dado."""
+        q = f"""
+            SELECT COUNT(*) as total,
+                   SUM(o.win_{horizon}) as wins,
+                   AVG(o.pct_{horizon}) as avg_pct
+            FROM signals s
+            JOIN outcomes o ON o.signal_id = s.id
+            WHERE o.win_{horizon} IS NOT NULL AND {where_clause}
+        """
+        r = conn.execute(q, params).fetchone()
+        if not r or not r["total"]:
+            return None
+        return {
+            "total": r["total"],
+            "wins": r["wins"] or 0,
+            "rate": round((r["wins"] or 0) / r["total"] * 100, 1),
+            "avg_pct": round(r["avg_pct"] or 0, 2),
+        }
+
+    # Resumen global
+    total_signals = conn.execute("SELECT COUNT(*) as n FROM signals").fetchone()["n"]
+    pending = conn.execute(
+        "SELECT COUNT(*) as n FROM outcomes WHERE win_72h IS NULL"
+    ).fetchone()["n"]
+
+    # Fecha de la primera y ultima señal (para saber cuanto tiempo lleva midiendo)
+    span = conn.execute(
+        "SELECT MIN(created_at) as first, MAX(created_at) as last FROM signals"
+    ).fetchone()
+
+    report = {
+        "total_signals": total_signals,
+        "pending_outcomes": pending,
+        "evaluated": total_signals - pending,
+        "first_signal": span["first"],
+        "last_signal": span["last"],
+        "generated_at": datetime.utcnow().isoformat(),
+        "by_signal_type": {},
+        "by_confidence": {},
+        "by_regime": {},
+        "by_asset": {},
+        "global_72h": rate_for("1=1", (), "72h"),
+    }
+
+    # Por tipo de señal (LONG / SHORT)
+    for sig in ["LONG", "SHORT"]:
+        row = {h: rate_for("s.signal LIKE ?", (f"%{sig}%",), h)
+               for h in ["4h", "24h", "72h"]}
+        if any(row.values()):
+            report["by_signal_type"][sig] = row
+
+    # Por confianza (ALTA / MEDIA / BAJA)
+    for conf in ["ALTA", "MEDIA", "BAJA"]:
+        row = {h: rate_for("s.confidence = ?", (conf,), h)
+               for h in ["4h", "24h", "72h"]}
+        if any(row.values()):
+            report["by_confidence"][conf] = row
+
+    # Por regimen (agrupado por direccion)
+    regime_groups = {
+        "BULL": "s.regime LIKE '%BULL%'",
+        "BEAR": "s.regime LIKE '%BEAR%'",
+        "NEUTRO": "(s.regime LIKE '%LATERAL%' OR s.regime LIKE '%TRANSICI%')",
+    }
+    for label, clause in regime_groups.items():
+        row = {h: rate_for(clause, (), h) for h in ["4h", "24h", "72h"]}
+        if any(row.values()):
+            report["by_regime"][label] = row
+
+    # Por activo
+    assets = conn.execute("SELECT DISTINCT asset FROM signals").fetchall()
+    for a in assets:
+        asset = a["asset"]
+        row = {h: rate_for("s.asset = ?", (asset,), h)
+               for h in ["4h", "24h", "72h"]}
+        if any(row.values()):
+            report["by_asset"][asset] = row
+
+    conn.close()
+    return report
 
 
 # Inicializar DB al importar
