@@ -205,7 +205,7 @@
   <div class="tab" onclick="showTab('history')">Historial señales</div>
 </div>
 
-<div id="tab-signals"><div id="grid" class="grid"><div class="loading">Cargando...</div></div></div>
+<div id="tab-signals"><div id="global-summary"></div><div id="scenarios-panel"></div><div id="grid" class="grid"><div class="loading">Cargando...</div></div></div>
 
 <div id="tab-ops" class="hidden">
   <div id="ops-summary"></div>
@@ -436,10 +436,16 @@ function renderCard(r) {
     <span style="margin-left:auto;font-size:0.7rem;color:#8b949e">Umbral: ±${r.threshold_used || 9}</span>
   </div>` : '';
 
+  // Resumen en lenguaje claro (interpretacion de los indicadores)
+  const summaryHtml = r.summary ? `<div style="background:#0d1117;border-radius:6px;padding:10px 12px;margin-bottom:12px;border-left:3px solid #388bfd">
+    <div style="font-size:0.62rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Lectura del bot</div>
+    <div style="font-size:0.82rem;color:#adbac7;line-height:1.45">${r.summary}</div>
+  </div>` : '';
+
   // Funding rate (sentimiento de perpetuos)
   const fundingHtml = r.funding?.available ? `<div style="background:#0d1117;border-radius:6px;padding:7px 10px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
     <div>
-      <span style="font-size:0.7rem;color:#8b949e">Funding rate (Binance):</span>
+      <span style="font-size:0.7rem;color:#8b949e">Funding rate (${(r.funding.source || 'exchange').charAt(0).toUpperCase() + (r.funding.source || 'exchange').slice(1)}):</span>
       <span style="font-size:0.85rem;font-weight:600;color:${fundingColor(r.funding.signal_impact)};margin-left:6px">${r.funding.rate > 0 ? '+' : ''}${r.funding.rate}%</span>
     </div>
     <div style="font-size:0.7rem;color:${fundingColor(r.funding.signal_impact)}">${r.funding.sentiment}</div>
@@ -546,6 +552,7 @@ function renderCard(r) {
     </div>
     ${r.signal_reason ? `<div class="signal-reason">${r.signal_reason}</div>` : ''}
     ${regimeHtml}
+    ${summaryHtml}
     ${btcFilterHtml}
     ${trendsHtml}
     ${adxHtml}
@@ -576,12 +583,62 @@ async function loadData() {
     const data = await r.json();
     marketData = data.results || [];
     document.getElementById('last-update').textContent = 'Actualizado: ' + (data.last_update || '—');
+
+    // Resumen global del mercado
+    const gs = data.global_summary;
+    const gsEl = document.getElementById('global-summary');
+    if (gs && gsEl) {
+      gsEl.innerHTML = `<div style="background:linear-gradient(135deg,#161b22,#0d1117);border:1px solid #30363d;border-radius:10px;padding:16px 18px;margin-bottom:16px">
+        <div style="font-size:0.7rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Resumen del mercado</div>
+        <div style="font-size:1.15rem;font-weight:700;color:#e6edf3;margin-bottom:8px">${gs.headline}</div>
+        <div style="font-size:0.85rem;color:#adbac7;line-height:1.5">${gs.detail}</div>
+      </div>`;
+    }
+
     document.getElementById('grid').innerHTML = marketData.length
       ? marketData.map(renderCard).join('')
       : '<div class="loading">Sin datos</div>';
+
+    renderScenariosPanel(marketData);
   } catch(e) {
     document.getElementById('grid').innerHTML = '<div class="loading">Error</div>';
   }
+}
+
+function renderScenariosPanel(data) {
+  const el = document.getElementById('scenarios-panel');
+  if (!el) return;
+  const withScenarios = data.filter(r => !r.error && r.scenarios);
+  if (!withScenarios.length) { el.innerHTML = ''; return; }
+
+  const blocks = withScenarios.map(r => {
+    const sc = r.scenarios;
+    const layers = sc.layers;
+    const layerRow = (key, l) => `<div style="display:flex;gap:8px;align-items:baseline;margin-bottom:3px">
+      <span style="font-size:0.62rem;color:#8b949e;text-transform:uppercase;min-width:74px">${key} [${l.tf}]</span>
+      <span style="font-size:0.82rem;font-weight:600;color:${l.trend==='alcista'?'#3fb950':l.trend==='bajista'?'#f85149':'#8b949e'}">${l.trend}</span>
+      <span style="font-size:0.7rem;color:#6e7681">${l.rol}</span>
+    </div>`;
+
+    const escenarios = (sc.escenarios||[]).map(e =>
+      `<div style="font-size:0.8rem;color:#adbac7;line-height:1.45;margin-bottom:6px;padding-left:10px;border-left:2px solid ${e.tipo==='alcista'?'#238636':'#da3633'}">${e.texto}</div>`
+    ).join('');
+
+    return `<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:14px;margin-bottom:10px">
+      <div style="font-size:1rem;font-weight:700;color:#e6edf3;margin-bottom:10px">${r.name}/USDT — $${fmt(r.price)}</div>
+      <div style="margin-bottom:10px">${layerRow('Fondo',layers.fondo)}${layerRow('Estructura',layers.estructura)}${layerRow('Timing',layers.timing)}</div>
+      <div style="font-size:0.82rem;color:#adbac7;line-height:1.45;margin-bottom:10px;font-style:italic">${sc.interpretacion}</div>
+      <div style="font-size:0.62rem;color:#8b949e;text-transform:uppercase;margin-bottom:5px">Escenarios</div>
+      ${escenarios}
+      <div style="font-size:0.75rem;color:#388bfd;line-height:1.4;margin-top:8px;background:#0d2438;padding:7px 9px;border-radius:5px">${sc.vigilar}</div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `<details style="background:linear-gradient(135deg,#161b22,#0d1117);border:1px solid #30363d;border-radius:10px;padding:14px 18px;margin-bottom:16px">
+    <summary style="cursor:pointer;font-size:0.95rem;font-weight:700;color:#e6edf3;user-select:none">Escenarios y lectura multi-timeframe</summary>
+    <div style="font-size:0.72rem;color:#8b949e;margin:8px 0 14px;line-height:1.4">Lectura por capas (fondo manda, corto da timing) y qué tiene que pasar en cada caso. No es recomendación: son condiciones sobre niveles que el mercado ya marcó.</div>
+    ${blocks}
+  </details>`;
 }
 
 // ── Operaciones ──────────────────────────────────────────────────────────────
