@@ -25,6 +25,7 @@ SYMBOLS = {
     "ETH": "ETHUSD",
     "SOL": "SOLUSD",
     "XRP": "XRPUSD",
+    "LINK": "LINKUSD",
 }
 
 KRAKEN_URL = "https://api.kraken.com/0/public/OHLC"
@@ -42,6 +43,7 @@ FUNDING_SYMBOLS = {
     "ETH": {"binance": "ETHUSDT", "bybit": "ETHUSDT", "okx": "ETH-USDT-SWAP"},
     "SOL": {"binance": "SOLUSDT", "bybit": "SOLUSDT", "okx": "SOL-USDT-SWAP"},
     "XRP": {"binance": "XRPUSDT", "bybit": "XRPUSDT", "okx": "XRP-USDT-SWAP"},
+    "LINK": {"binance": "LINKUSDT", "bybit": "LINKUSDT", "okx": "LINK-USDT-SWAP"},
 }
 
 # Score maximo teorico (suma de todos los pesos positivos)
@@ -769,6 +771,118 @@ def get_signal(score: float, trend_1h: str, trend_1d: str, trend_1w: str,
 
 # ── Señal de cierre (logica de ESTADO, no de cruce momentaneo) ───────────────
 
+def detect_trend_reversal(df: pd.DataFrame, current_regime: str) -> dict:
+    """
+    Detecta AGOTAMIENTO / posible giro de tendencia ANTES de que se confirme.
+
+    Motivacion: los datos mostraron que las señales SHORT envejecen mal (ganan
+    en 4H, pierden en 72H). Esto pasa porque la tendencia se agota y rebota.
+    Este detector busca señales tempranas de ese agotamiento.
+
+    Combina 5 factores objetivos (cada uno suma al reversal_score 0-100):
+      1. ADX cayendo desde un pico (la tendencia pierde fuerza motriz)  -> 25
+      2. Divergencia activa (RSI u OBV) contra la tendencia              -> 25
+      3. Cruce DI (DI+ y DI- se cruzan, cambio de dominancia)            -> 20
+      4. RSI(6) en extremo (sobrecompra en bull / sobreventa en bear)    -> 15
+      5. MACD histograma desacelerando (momentum perdiendo fuerza)       -> 15
+
+    Devuelve:
+      reversal_score: 0-100 (mayor = mas probable que la tendencia gire)
+      reversing: bool (score >= 50)
+      direction: hacia donde giraria ("ALCISTA"/"BAJISTA"/None)
+      signals: lista de razones detectadas
+    """
+    if len(df) < 20:
+        return {"reversal_score": 0, "reversing": False, "direction": None, "signals": []}
+
+    row = df.iloc[-2]
+    score = 0
+    signals = []
+
+    # Direccion de la tendencia actual (a partir del regimen)
+    is_bull = "BULL" in (current_regime or "")
+    is_bear = "BEAR" in (current_regime or "")
+
+    # ── Factor 1: ADX cayendo desde un pico ───────────────────────────────
+    # Si el ADX viene de un maximo reciente y ahora baja, la tendencia se enfria
+    adx_series = df["ADX"].dropna()
+    if len(adx_series) >= 6:
+        adx_now = adx_series.iloc[-2]
+        adx_peak = adx_series.iloc[-6:-1].max()
+        if pd.notna(adx_now) and pd.notna(adx_peak) and adx_peak > 25:
+            drop = adx_peak - adx_now
+            if drop >= 4:  # cayo al menos 4 puntos desde el pico (agotamiento temprano)
+                score += 25
+                signals.append(f"ADX cayendo desde pico ({adx_peak:.0f}->{adx_now:.0f}): tendencia perdiendo fuerza")
+
+    # ── Factor 2: Divergencia contra la tendencia ─────────────────────────
+    rsi_div = detect_rsi_divergence(df)
+    obv_div = detect_obv_divergence(df)
+    if is_bear and (rsi_div.get("bullish") or obv_div.get("bullish")):
+        score += 25
+        tipo = "RSI" if rsi_div.get("bullish") else "OBV"
+        signals.append(f"Divergencia {tipo} alcista en tendencia bajista: posible piso")
+    elif is_bull and (rsi_div.get("bearish") or obv_div.get("bearish")):
+        score += 25
+        tipo = "RSI" if rsi_div.get("bearish") else "OBV"
+        signals.append(f"Divergencia {tipo} bajista en tendencia alcista: posible techo")
+
+    # ── Factor 3: Cruce de DI (cambio de dominancia direccional) ──────────
+    if len(df) >= 4 and all(c in df.columns for c in ["DI_POS", "DI_NEG"]):
+        di_pos_now = df["DI_POS"].iloc[-2]
+        di_neg_now = df["DI_NEG"].iloc[-2]
+        di_pos_prev = df["DI_POS"].iloc[-4]
+        di_neg_prev = df["DI_NEG"].iloc[-4]
+        if all(pd.notna(x) for x in [di_pos_now, di_neg_now, di_pos_prev, di_neg_prev]):
+            # En bear: DI+ cruza por encima de DI- = giro alcista
+            if is_bear and di_pos_prev < di_neg_prev and di_pos_now > di_neg_now:
+                score += 20
+                signals.append("Cruce DI+ sobre DI-: presion compradora tomando control")
+            # En bull: DI- cruza por encima de DI+ = giro bajista
+            elif is_bull and di_neg_prev < di_pos_prev and di_neg_now > di_pos_now:
+                score += 20
+                signals.append("Cruce DI- sobre DI+: presion vendedora tomando control")
+
+    # ── Factor 4: RSI(6) en extremo ───────────────────────────────────────
+    rsi6 = row.get("RSI6")
+    if pd.notna(rsi6):
+        if is_bear and rsi6 < 20:
+            score += 15
+            signals.append(f"RSI(6) en sobreventa extrema ({rsi6:.0f}): caida madura, rebote probable")
+        elif is_bull and rsi6 > 80:
+            score += 15
+            signals.append(f"RSI(6) en sobrecompra extrema ({rsi6:.0f}): subida madura, correccion probable")
+
+    # ── Factor 5: MACD histograma desacelerando ───────────────────────────
+    if "MACD_HIST" in df.columns and len(df) >= 4:
+        h_now = df["MACD_HIST"].iloc[-2]
+        h_prev = df["MACD_HIST"].iloc[-3]
+        h_prev2 = df["MACD_HIST"].iloc[-4]
+        if all(pd.notna(x) for x in [h_now, h_prev, h_prev2]):
+            # En bear el hist es negativo; si se achica (sube hacia 0) = desacelera la caida
+            if is_bear and h_now < 0 and h_now > h_prev > h_prev2:
+                score += 15
+                signals.append("MACD histograma contrayendose: momentum bajista debilitando")
+            elif is_bull and h_now > 0 and h_now < h_prev < h_prev2:
+                score += 15
+                signals.append("MACD histograma contrayendose: momentum alcista debilitando")
+
+    # Direccion del giro potencial
+    direction = None
+    if score >= 50:
+        if is_bear:
+            direction = "ALCISTA"
+        elif is_bull:
+            direction = "BAJISTA"
+
+    return {
+        "reversal_score": score,
+        "reversing": score >= 50,
+        "direction": direction,
+        "signals": signals,
+    }
+
+
 def get_close_signal(df: pd.DataFrame, open_signal: str) -> dict:
     """
     Detecta condiciones de cierre evaluando ESTADO ACTUAL.
@@ -918,6 +1032,7 @@ def analyze(name: str, symbol: str) -> dict:
 
         close_long  = get_close_signal(df_4h, "LONG")
         close_short = get_close_signal(df_4h, "SHORT")
+        reversal = detect_trend_reversal(df_4h, regime_data["regime"])
 
         target_for_signal = "ALCISTA" if "LONG" in signal_data["signal"] else "BAJISTA" if "SHORT" in signal_data["signal"] else None
         confirm_1h = (trend_1h == target_for_signal) if target_for_signal else False
@@ -970,6 +1085,7 @@ def analyze(name: str, symbol: str) -> dict:
             "pivots":    pivots,
             "close_long":  close_long,
             "close_short": close_short,
+            "reversal":    reversal,
             "updated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
             "error": None,
         }

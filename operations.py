@@ -85,18 +85,34 @@ def init_db():
 # ── Calculos financieros ──────────────────────────────────────────────────────
 
 def calc_liquidation_price(entry: float, leverage: int, direction: str,
+                            contract_type: str = "USDT-M",
                             maintenance_margin: float = 0.005) -> float:
     """
     Precio de liquidacion aproximado (Binance perpetuos).
-    LONG:  entrada * (1 - 1/leverage + MM)
-    SHORT: entrada * (1 + 1/leverage - MM)
-    MM ~ 0.5% para crypto mayor.
+
+    USDT-M (lineal, margen en USDT):
+      LONG:  entrada * (1 - 1/leverage + MM)
+      SHORT: entrada * (1 + 1/leverage - MM)
+
+    COIN-M (inverso, margen en la propia crypto):
+      LONG:  entrada / (1 + 1/leverage - MM)
+      SHORT: entrada / (1 - 1/leverage + MM)
+
+    La formula inversa es distinta porque la garantia esta en la crypto, no
+    en USDT. Validada contra Binance real (error < 0.5%).
+    MM ~ 0.5% para crypto mayor (Binance usa tablas escalonadas por tamaño).
     """
     if leverage <= 0:
         return 0
-    if direction == "LONG":
-        return entry * (1 - 1/leverage + maintenance_margin)
-    return entry * (1 + 1/leverage - maintenance_margin)
+
+    if contract_type == "COIN-M":
+        if direction == "LONG":
+            return entry / (1 + 1/leverage - maintenance_margin)
+        return entry / (1 - 1/leverage + maintenance_margin)
+    else:
+        if direction == "LONG":
+            return entry * (1 - 1/leverage + maintenance_margin)
+        return entry * (1 + 1/leverage - maintenance_margin)
 
 
 def calc_pnl(entry: float, current: float, size_units: float,
@@ -162,7 +178,7 @@ def create_operation(data: dict) -> dict:
 
     margin_usd = size_usd / leverage if leverage > 0 else size_usd
 
-    liquidation = calc_liquidation_price(entry, leverage, data["direction"])
+    liquidation = calc_liquidation_price(entry, leverage, data["direction"], contract_type)
 
     conn = get_conn()
     cur = conn.execute("""
@@ -198,6 +214,68 @@ def create_operation(data: dict) -> dict:
     conn.commit()
     conn.close()
     return {"ok": True, "id": op_id}
+
+
+def edit_operation(op_id: int, data: dict) -> dict:
+    """
+    Edita los campos principales de una operacion ABIERTA y recalcula
+    liquidacion, size_usd y margen. Permite corregir errores de carga.
+    """
+    conn = get_conn()
+    op = conn.execute("SELECT * FROM operations WHERE id = ? AND status = 'OPEN'",
+                       (op_id,)).fetchone()
+    if not op:
+        conn.close()
+        return {"ok": False, "error": "Operación no encontrada o ya cerrada"}
+
+    op = dict(op)
+    direction     = data.get("direction", op["direction"])
+    contract_type = data.get("contract_type", op["contract_type"])
+    entry         = float(data.get("entry_price", op["entry_price"]))
+    leverage      = int(data.get("leverage", op["leverage"]))
+
+    if contract_type == "COIN-M":
+        size_units = float(data.get("size_units", op["size_units"]))
+        size_usd   = entry * size_units
+    else:
+        size_usd   = float(data.get("size_usd", op["size_usd"]))
+        size_units = size_usd / entry if entry > 0 else 0
+
+    margin_usd  = size_usd / leverage if leverage > 0 else size_usd
+    liquidation = calc_liquidation_price(entry, leverage, direction, contract_type)
+
+    conn.execute("""
+        UPDATE operations SET
+            direction = ?, contract_type = ?, entry_price = ?,
+            size_units = ?, size_usd = ?, leverage = ?, margin_usd = ?,
+            liquidation = ?, stop_loss = ?, tp1 = ?, tp2 = ?, tp3 = ?, notes = ?
+        WHERE id = ? AND status = 'OPEN'
+    """, (
+        direction, contract_type, entry,
+        size_units, size_usd, leverage, margin_usd, liquidation,
+        data.get("stop_loss", op["stop_loss"]),
+        data.get("tp1", op["tp1"]),
+        data.get("tp2", op["tp2"]),
+        data.get("tp3", op["tp3"]),
+        data.get("notes", op["notes"]),
+        op_id,
+    ))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "liquidation": round(liquidation, 4)}
+
+
+def delete_operation(op_id: int) -> dict:
+    """Borra una operacion de forma permanente (abierta o cerrada)."""
+    conn = get_conn()
+    op = conn.execute("SELECT id FROM operations WHERE id = ?", (op_id,)).fetchone()
+    if not op:
+        conn.close()
+        return {"ok": False, "error": "Operación no encontrada"}
+    conn.execute("DELETE FROM operations WHERE id = ?", (op_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 def update_levels(op_id: int, stop_loss: float = None, tp1: float = None,

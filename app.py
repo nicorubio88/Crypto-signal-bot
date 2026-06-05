@@ -7,10 +7,11 @@ import numpy as np
 from flask import Flask, render_template, Response, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from engine import run_analysis, build_global_summary
-from telegram_bot import notify_if_signal, format_signal_message, send_message, format_regime_change_message
+from telegram_bot import notify_if_signal, format_signal_message, send_message, format_regime_change_message, format_reversal_message
 from tracker import save_signal, update_outcomes, get_stats, get_all_signals, get_evolution_report
 from operations import (
     create_operation, close_operation, update_levels,
+    edit_operation, delete_operation,
     get_open_operations, get_closed_operations,
     enrich_open_with_market, get_summary_stats
 )
@@ -28,6 +29,7 @@ state = {
     "global_summary": None,  # resumen global del mercado (4 activos)
     "last_signals": {},
     "last_regimes": {},  # tracking de regimen anterior por activo (cambio de regimen)
+    "last_reversal": {},  # tracking de alerta de giro ya enviada por activo
     "operation_alerts_sent": {},  # tracking de alertas ya enviadas por operacion
 }
 
@@ -138,6 +140,18 @@ def refresh_data():
             print(f"  Cambio de regimen: {name} {prev_regime} -> {regime}")
 
         state["last_regimes"][name] = regime
+
+        # ── Alerta de posible giro de tendencia (agotamiento detectado) ──
+        rev = r.get("reversal", {})
+        if rev.get("reversing"):
+            # Solo avisa una vez por episodio: si antes no estaba reversing
+            was_reversing = state["last_reversal"].get(name, False)
+            if not was_reversing:
+                send_message(format_reversal_message(r))
+                print(f"  Posible giro: {name} -> {rev.get('direction')} (score {rev.get('reversal_score')})")
+            state["last_reversal"][name] = True
+        else:
+            state["last_reversal"][name] = False
 
     CACHE_PATH.parent.mkdir(exist_ok=True)
     with open(CACHE_PATH, "w") as f:
@@ -291,6 +305,21 @@ def api_op_update(op_id):
         tp2=float(data["tp2"]) if data.get("tp2") else None,
         tp3=float(data["tp3"]) if data.get("tp3") else None,
     )
+    return Response(json.dumps(result), mimetype="application/json")
+
+
+@app.route("/api/operations/<int:op_id>/edit", methods=["POST"])
+def api_op_edit(op_id):
+    """Edita todos los campos de una operacion abierta (corregir errores)."""
+    result = edit_operation(op_id, request.json)
+    return Response(json.dumps(sanitize(result)), mimetype="application/json")
+
+
+@app.route("/api/operations/<int:op_id>/delete", methods=["POST"])
+def api_op_delete(op_id):
+    """Borra una operacion de forma permanente."""
+    result = delete_operation(op_id)
+    state["operation_alerts_sent"].pop(op_id, None)
     return Response(json.dumps(result), mimetype="application/json")
 
 

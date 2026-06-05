@@ -151,6 +151,52 @@ def format_signal_message(result: dict) -> str:
     return "\n".join(lines)
 
 
+def format_reversal_message(result: dict) -> str:
+    """
+    Alerta de posible giro de tendencia (agotamiento detectado).
+    Sirve para salir de posiciones a tiempo y para detectar pisos/techos.
+    """
+    name = result.get("name", "?")
+    price = result.get("price", 0)
+    rev = result.get("reversal", {})
+    regime = result.get("regime", "—")
+    direction = rev.get("direction", "—")
+
+    def fmt_price(p):
+        if p is None: return "—"
+        if abs(p) >= 10: return f"${p:,.2f}"
+        return f"${p:,.4f}"
+
+    lines = [
+        f"=== POSIBLE GIRO DE TENDENCIA - {name}/USDT ===",
+        f"Precio: {fmt_price(price)}",
+        f"Fuerza de la señal: {rev.get('reversal_score', 0)}/100",
+        "",
+        f"Régimen actual: {regime}",
+        f"Posible giro hacia: {direction}",
+        "",
+        "SEÑALES DETECTADAS:",
+    ]
+    for s in rev.get("signals", []):
+        lines.append(f"  * {s}")
+
+    lines.append("")
+    if direction == "ALCISTA":
+        lines.append("LECTURA: la tendencia bajista muestra agotamiento.")
+        lines.append("Si tenés SHORT, considerá proteger ganancias.")
+        lines.append("Si esperás un piso para LONG, vigilá confirmación.")
+    elif direction == "BAJISTA":
+        lines.append("LECTURA: la tendencia alcista muestra agotamiento.")
+        lines.append("Si tenés LONG, considerá proteger ganancias.")
+        lines.append("Si esperás un techo para SHORT, vigilá confirmación.")
+
+    lines.append("")
+    lines.append("Nota: es una señal de alerta temprana, no confirmacion. Vigilá el proximo cierre.")
+    lines.append("")
+    lines.append(result.get("updated_at", ""))
+    return "\n".join(lines)
+
+
 def format_regime_change_message(result: dict, prev_regime: str) -> str:
     """
     Alerta de cambio de regimen del mercado (con o sin posicion abierta).
