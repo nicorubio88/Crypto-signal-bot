@@ -238,6 +238,7 @@
           <option value="ETH">ETH</option>
           <option value="SOL">SOL</option>
           <option value="XRP">XRP</option>
+          <option value="LINK">LINK</option>
         </select>
       </div>
       <div class="form-row">
@@ -252,41 +253,37 @@
     <div class="form-row">
       <label>Tipo de contrato</label>
       <select id="op-contract-type" onchange="toggleContractMode()">
-        <option value="USDT-M">USDT-M (tamaño en USD, margen en USD)</option>
         <option value="COIN-M">COIN-M (tamaño en crypto, margen en crypto)</option>
+        <option value="USDT-M">USDT-M (tamaño en USD, margen en USD)</option>
       </select>
-      <span class="form-help">USDT-M: perpetuos estándar. COIN-M: contratos inversos liquidados en BTC/ETH</span>
+      <span class="form-help">Mirá Binance: si el tamaño está en BTC/ETH → COIN-M. Si está en USDT → USDT-M.</span>
     </div>
 
     <div class="form-grid">
       <div class="form-row">
         <label>Precio entrada</label>
-        <input id="op-entry" type="number" step="any" oninput="recalcSize()">
+        <input id="op-entry" type="number" step="any" oninput="updateLiqPreview()">
         <span class="form-help" id="op-current-price"></span>
       </div>
       <div class="form-row">
         <label>Apalancamiento</label>
-        <select id="op-leverage" onchange="recalcSize()">
-          <option value="1">1x (Spot equivalente)</option>
+        <select id="op-leverage" onchange="updateLiqPreview()">
+          <option value="1">1x</option>
+          <option value="2">2x</option>
           <option value="3">3x</option>
           <option value="5" selected>5x</option>
           <option value="10">10x</option>
           <option value="20">20x</option>
+          <option value="25">25x</option>
         </select>
       </div>
     </div>
 
-    <div class="form-row">
-      <label>Capital total disponible (USD)</label>
-      <input id="op-capital" type="number" step="any" value="10000" oninput="recalcSize()">
-      <span class="form-help">Se usa para calcular el tamaño sugerido (2.5% de riesgo)</span>
-    </div>
-
     <div class="form-grid">
       <div class="form-row">
-        <label id="op-size-label">Tamaño (unidades)</label>
-        <input id="op-size" type="number" step="any">
-        <span class="form-help" id="op-size-info"></span>
+        <label id="op-size-label">Tamaño (crypto)</label>
+        <input id="op-size" type="number" step="any" oninput="updateLiqPreview()">
+        <span class="form-help" id="op-size-info">El número exacto que muestra Binance</span>
       </div>
       <div class="form-row">
         <label>Modo margen</label>
@@ -299,11 +296,16 @@
 
     <div id="op-size-usd-row" class="form-row hidden">
       <label>Tamaño (USD)</label>
-      <input id="op-size-usd" type="number" step="any" oninput="recalcSizeFromUSD()">
-      <span class="form-help" id="op-size-usd-info"></span>
+      <input id="op-size-usd" type="number" step="any">
     </div>
 
-    <h3 style="font-size:0.8rem;color:#8b949e;margin:8px 0 6px;text-transform:uppercase">Niveles (sugerido por ATR)</h3>
+    <div style="background:#0d1117;border-radius:6px;padding:10px 12px;margin:4px 0 8px;border-left:3px solid #388bfd">
+      <div style="font-size:0.7rem;color:#8b949e;margin-bottom:3px">Precio de liquidación calculado</div>
+      <div id="op-liq-preview" style="font-size:1rem;font-weight:700;color:#e6edf3">—</div>
+      <div style="font-size:0.68rem;color:#8b949e;margin-top:3px">Comparalo con el de Binance. Si coinciden (±0.5%), cargaste bien.</div>
+    </div>
+
+    <h3 style="font-size:0.8rem;color:#8b949e;margin:8px 0 6px;text-transform:uppercase">Niveles (opcional)</h3>
     <div class="form-grid">
       <div class="form-row">
         <label>Stop Loss</label>
@@ -332,7 +334,7 @@
 
     <div class="modal-actions">
       <button class="btn" onclick="closeModal('modal-new')">Cancelar</button>
-      <button class="btn btn-primary" onclick="submitNewOp()">Abrir operación</button>
+      <button class="btn btn-primary" id="op-submit-btn" onclick="submitNewOp()">Crear operación</button>
     </div>
   </div>
 </div>
@@ -367,6 +369,8 @@
 <script>
 let currentTab = 'signals';
 let marketData = [];
+let openOpsCache = [];
+let editingOpId = null;
 let closingOpId = null;
 
 function showTab(tab) {
@@ -440,6 +444,14 @@ function renderCard(r) {
   const summaryHtml = r.summary ? `<div style="background:#0d1117;border-radius:6px;padding:10px 12px;margin-bottom:12px;border-left:3px solid #388bfd">
     <div style="font-size:0.62rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Lectura del bot</div>
     <div style="font-size:0.82rem;color:#adbac7;line-height:1.45">${r.summary}</div>
+  </div>` : '';
+
+  // Alerta de posible giro de tendencia (agotamiento)
+  const rev = r.reversal || {};
+  const revHtml = (rev.reversing) ? `<div style="background:#2d2100;border:1px solid #bb8009;border-radius:6px;padding:10px 12px;margin-bottom:12px">
+    <div style="font-size:0.7rem;color:#f0b429;font-weight:700;margin-bottom:4px">POSIBLE GIRO DE TENDENCIA → ${rev.direction || ''} (fuerza ${rev.reversal_score}/100)</div>
+    <div style="font-size:0.74rem;color:#adbac7;line-height:1.4">${(rev.signals||[]).map(s=>'• '+s).join('<br>')}</div>
+    <div style="font-size:0.66rem;color:#8b949e;margin-top:5px;font-style:italic">Alerta temprana, no confirmación. Vigilá el próximo cierre.</div>
   </div>` : '';
 
   // Funding rate (sentimiento de perpetuos)
@@ -553,6 +565,7 @@ function renderCard(r) {
     ${r.signal_reason ? `<div class="signal-reason">${r.signal_reason}</div>` : ''}
     ${regimeHtml}
     ${summaryHtml}
+    ${revHtml}
     ${btcFilterHtml}
     ${trendsHtml}
     ${adxHtml}
@@ -686,6 +699,7 @@ function renderOpsSummary(s) {
 }
 
 function renderOpenOps(ops) {
+  openOpsCache = ops;
   if (!ops.length) {
     document.getElementById('ops-open').innerHTML = '<div class="empty-state">No tenés operaciones abiertas. Hacé click en "+ Nueva operación" para empezar.</div>';
     return;
@@ -767,6 +781,8 @@ function renderOpCard(op) {
 
     <div class="op-actions">
       <button class="btn btn-danger" onclick="openCloseModal(${op.id}, ${op.current_price})">Cerrar operación</button>
+      <button class="btn" onclick="editOp(${op.id})" style="background:#30363d">Editar</button>
+      <button class="btn" onclick="deleteOp(${op.id})" style="background:#6e2020;color:#ff9b9b">Borrar</button>
     </div>
   </div>`;
 }
@@ -799,6 +815,12 @@ function openModal(id) { document.getElementById(id).classList.add('show'); }
 function closeModal(id) { document.getElementById(id).classList.remove('show'); }
 
 function openNewOp() {
+  editingOpId = null;
+  document.getElementById('op-submit-btn').textContent = 'Crear operación';
+  // limpiar campos
+  ['op-entry','op-size','op-stop','op-tp1','op-tp2','op-tp3','op-notes'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
   openModal('modal-new');
   toggleContractMode();
   suggestLevels();
@@ -807,18 +829,16 @@ function openNewOp() {
 function toggleContractMode() {
   const mode = document.getElementById('op-contract-type').value;
   const asset = document.getElementById('op-asset').value;
-
   if (mode === 'USDT-M') {
-    // Modo USDT-M: tamaño en USD, ocultar campo crypto
     document.getElementById('op-size-label').textContent = 'Tamaño (USD)';
-    document.getElementById('op-size-usd-row').classList.add('hidden');
-    document.getElementById('op-size-info').textContent = 'Exposición total en USD';
+    document.getElementById('op-size-info').textContent = 'El número exacto que muestra Binance, en USD';
   } else {
-    // Modo COIN-M: tamaño en crypto
     document.getElementById('op-size-label').textContent = `Tamaño (${asset})`;
-    document.getElementById('op-size-usd-row').classList.remove('hidden');
+    document.getElementById('op-size-info').textContent = `El número exacto que muestra Binance (ej: 0.0871 ${asset})`;
   }
-  recalcSize();
+  const usdRow = document.getElementById('op-size-usd-row');
+  if (usdRow) usdRow.classList.add('hidden');
+  updateLiqPreview();
 }
 
 function getMarketFor(asset) {
@@ -830,72 +850,33 @@ function suggestLevels() {
   const dir   = document.getElementById('op-direction').value;
   const m = getMarketFor(asset);
   if (!m) return;
-
-  document.getElementById('op-entry').value = m.price;
-  document.getElementById('op-current-price').textContent = `Precio actual: $${fmt(m.price)}`;
-
-  // Actualizar label si es COIN-M
+  const entryEl = document.getElementById('op-entry');
+  if (!entryEl.value) entryEl.value = m.price;  // no pisa lo que cargás
+  document.getElementById('op-current-price').textContent = `Precio actual del bot: $${fmt(m.price)}`;
   const mode = document.getElementById('op-contract-type').value;
   if (mode === 'COIN-M') {
     document.getElementById('op-size-label').textContent = `Tamaño (${asset})`;
   }
-
-  const lvl = m.levels || {};
-  if (dir === 'LONG') {
-    document.getElementById('op-stop').value = lvl.stop_long;
-    document.getElementById('op-tp1').value = lvl.tp1_long;
-    document.getElementById('op-tp2').value = lvl.tp2_long;
-    document.getElementById('op-tp3').value = lvl.tp3_long;
-  } else {
-    document.getElementById('op-stop').value = lvl.stop_short;
-    document.getElementById('op-tp1').value = lvl.tp1_short;
-    document.getElementById('op-tp2').value = lvl.tp2_short;
-    document.getElementById('op-tp3').value = lvl.tp3_short;
-  }
-  recalcSize();
+  updateLiqPreview();
 }
 
-function recalcSize() {
-  const capital  = parseFloat(document.getElementById('op-capital').value) || 10000;
+// Calcula liquidacion en vivo (misma formula que el backend) para comparar con Binance
+function updateLiqPreview() {
   const entry    = parseFloat(document.getElementById('op-entry').value) || 0;
-  const stop     = parseFloat(document.getElementById('op-stop').value) || 0;
   const leverage = parseInt(document.getElementById('op-leverage').value) || 1;
+  const dir      = document.getElementById('op-direction').value;
   const mode     = document.getElementById('op-contract-type').value;
-  const asset    = document.getElementById('op-asset').value;
-  const riskPct  = 0.025;
-
-  if (!entry || !stop) return;
-
-  const riskAmount    = capital * riskPct;
-  const stopDistance  = Math.abs(entry - stop) / entry;
-  const positionSize  = riskAmount / stopDistance;
-  const margin        = positionSize / leverage;
-
-  if (mode === 'USDT-M') {
-    // USDT-M: tamaño directo en USD
-    document.getElementById('op-size').value = positionSize.toFixed(2);
-    document.getElementById('op-size-info').textContent =
-      `margen: $${margin.toFixed(0)} | riesgo: $${riskAmount.toFixed(0)} (${(riskPct*100).toFixed(1)}%)`;
+  const MM = 0.005;
+  const el = document.getElementById('op-liq-preview');
+  if (!el) return;
+  if (!entry || leverage <= 0) { el.textContent = '—'; return; }
+  let liq;
+  if (mode === 'COIN-M') {
+    liq = dir === 'LONG' ? entry / (1 + 1/leverage - MM) : entry / (1 - 1/leverage + MM);
   } else {
-    // COIN-M: convertir a crypto
-    const units = positionSize / entry;
-    document.getElementById('op-size').value = units.toFixed(4);
-    document.getElementById('op-size-usd').value = positionSize.toFixed(2);
-    document.getElementById('op-size-info').textContent =
-      `~${units.toFixed(4)} ${asset} | margen: ~${(margin/entry).toFixed(4)} ${asset}`;
-    document.getElementById('op-size-usd-info').textContent =
-      `Exposición: $${positionSize.toFixed(0)} | riesgo: $${riskAmount.toFixed(0)} (${(riskPct*100).toFixed(1)}%)`;
+    liq = dir === 'LONG' ? entry * (1 - 1/leverage + MM) : entry * (1 + 1/leverage - MM);
   }
-}
-
-function recalcSizeFromUSD() {
-  // Cuando el usuario edita el campo USD en COIN-M
-  const entry = parseFloat(document.getElementById('op-entry').value) || 0;
-  const sizeUSD = parseFloat(document.getElementById('op-size-usd').value) || 0;
-  if (entry > 0) {
-    const units = sizeUSD / entry;
-    document.getElementById('op-size').value = units.toFixed(4);
-  }
+  el.textContent = '$' + fmt(liq);
 }
 
 async function submitNewOp() {
@@ -919,25 +900,57 @@ async function submitNewOp() {
     bot_score:      m?.score || 0,
     bot_confidence: m?.confidence || '',
   };
+  const sizeVal = parseFloat(document.getElementById('op-size').value);
+  if (mode === 'USDT-M') data.size_usd = sizeVal;
+  else data.size_units = sizeVal;
 
-  if (mode === 'USDT-M') {
-    data.size_usd = parseFloat(document.getElementById('op-size').value);
-  } else {
-    data.size_units = parseFloat(document.getElementById('op-size').value);
-  }
+  const url = editingOpId
+    ? `/api/operations/${editingOpId}/edit`
+    : '/api/operations/create';
 
-  const r = await fetch('/api/operations/create', {
+  const r = await fetch(url, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(data),
   });
   const res = await r.json();
   if (res.ok) {
+    editingOpId = null;
     closeModal('modal-new');
     loadOperations();
   } else {
     alert('Error: ' + res.error);
   }
+}
+
+function editOp(opId) {
+  const op = openOpsCache.find(o => o.id === opId);
+  if (!op) return;
+  editingOpId = opId;
+  document.getElementById('op-submit-btn').textContent = 'Guardar cambios';
+  document.getElementById('op-asset').value = op.asset;
+  document.getElementById('op-direction').value = op.direction;
+  document.getElementById('op-contract-type').value = op.contract_type || 'COIN-M';
+  document.getElementById('op-entry').value = op.entry_price;
+  document.getElementById('op-leverage').value = op.leverage || 5;
+  document.getElementById('op-margin').value = op.margin_mode || 'ISOLATED';
+  document.getElementById('op-size').value = (op.contract_type === 'USDT-M') ? op.size_usd : op.size_units;
+  document.getElementById('op-stop').value = op.stop_loss || '';
+  document.getElementById('op-tp1').value = op.tp1 || '';
+  document.getElementById('op-tp2').value = op.tp2 || '';
+  document.getElementById('op-tp3').value = op.tp3 || '';
+  document.getElementById('op-notes').value = op.notes || '';
+  toggleContractMode();
+  updateLiqPreview();
+  openModal('modal-new');
+}
+
+async function deleteOp(opId) {
+  if (!confirm(`¿Borrar la operación #${opId}? Esta acción no se puede deshacer.`)) return;
+  const r = await fetch(`/api/operations/${opId}/delete`, {method: 'POST'});
+  const res = await r.json();
+  if (res.ok) loadOperations();
+  else alert('Error: ' + res.error);
 }
 
 function openCloseModal(opId, currentPrice) {
