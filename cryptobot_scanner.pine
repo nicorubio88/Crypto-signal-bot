@@ -1,0 +1,103 @@
+// =============================================================
+// CryptobotNico - Indicador de escaneo para TradingView
+// Pine Script v5
+//
+// Replica la logica de deteccion del bot en el grafico:
+//  - Marca zonas RSI bajo + volumen alto (la condicion del posteo)
+//  - Muestra regimen via EMAs (alcista/bajista/lateral)
+//  - Detecta divergencias RSI basicas
+//  - Pinta señales LONG/SHORT cuando se alinean las condiciones
+//
+// COMO USAR:
+//  1. Abri TradingView -> Pine Editor (abajo)
+//  2. Pega este codigo completo
+//  3. "Add to chart" / "Guardar"
+//  4. Usar en timeframe 4H (igual que el bot) para coherencia
+//
+// NOTA: es una HERRAMIENTA VISUAL de apoyo, no una señal de
+// ejecucion automatica. Coincide en espiritu con el bot pero los
+// numeros exactos pueden diferir (TradingView vs Kraken/Binance).
+// =============================================================
+
+//@version=5
+indicator("CryptobotNico Scanner", overlay=true, max_labels_count=500)
+
+// ── Inputs ─────────────────────────────────────────────────
+rsiLen       = input.int(14, "RSI length", group="RSI")
+rsiOversold  = input.int(30, "RSI sobreventa", group="RSI")
+rsiOverbought= input.int(70, "RSI sobrecompra", group="RSI")
+volMult      = input.float(2.0, "Volumen x media (ej: 2 = +200%)", group="Volumen")
+volLen       = input.int(20, "Volumen media length", group="Volumen")
+emaFast      = input.int(20, "EMA rapida", group="Tendencia")
+emaSlow      = input.int(50, "EMA lenta", group="Tendencia")
+emaTrend     = input.int(200, "EMA tendencia mayor", group="Tendencia")
+showZones    = input.bool(true, "Marcar zonas de entrada", group="Visual")
+
+// ── Calculos ───────────────────────────────────────────────
+rsi   = ta.rsi(close, rsiLen)
+volMA = ta.sma(volume, volLen)
+volHigh = volume > volMA * volMult
+
+ef = ta.ema(close, emaFast)
+es = ta.ema(close, emaSlow)
+et = ta.ema(close, emaTrend)
+
+// Regimen por alineacion de EMAs
+bull = close > ef and ef > es and es > et
+bear = close < ef and ef < es and es < et
+regimeTxt = bull ? "ALCISTA" : bear ? "BAJISTA" : "LATERAL"
+regimeCol = bull ? color.green : bear ? color.red : color.gray
+
+// ── Divergencia RSI basica (precio hace minimo menor, RSI minimo mayor) ──
+pivLow  = ta.pivotlow(low, 5, 5)
+pivHigh = ta.pivothigh(high, 5, 5)
+var float lastPriceLow = na
+var float lastRsiLow = na
+bullDiv = false
+if not na(pivLow)
+    curRsiAtLow = rsi[5]
+    if not na(lastPriceLow) and low[5] < lastPriceLow and curRsiAtLow > lastRsiLow
+        bullDiv := true
+    lastPriceLow := low[5]
+    lastRsiLow := curRsiAtLow
+
+// ── Señales (condicion del posteo + regimen) ───────────────
+// LONG: RSI sobreventa + volumen alto + no en tendencia bajista fuerte
+longSignal  = rsi < rsiOversold and volHigh and not bear
+// SHORT: RSI sobrecompra + volumen alto + no en tendencia alcista fuerte
+shortSignal = rsi > rsiOverbought and volHigh and not bull
+
+// ── Visual ─────────────────────────────────────────────────
+plot(ef, "EMA20", color=color.new(color.blue, 0), linewidth=1)
+plot(es, "EMA50", color=color.new(color.orange, 0), linewidth=1)
+plot(et, "EMA200", color=color.new(color.purple, 0), linewidth=2)
+
+if longSignal and showZones
+    label.new(bar_index, low, "LONG\nRSI " + str.tostring(math.round(rsi)) + "\nVol alto",
+              color=color.green, textcolor=color.white, style=label.style_label_up, size=size.small)
+
+if shortSignal and showZones
+    label.new(bar_index, high, "SHORT\nRSI " + str.tostring(math.round(rsi)) + "\nVol alto",
+              color=color.red, textcolor=color.white, style=label.style_label_down, size=size.small)
+
+if bullDiv and showZones
+    label.new(bar_index[5], low[5], "Div+", color=color.aqua, textcolor=color.black,
+              style=label.style_label_up, size=size.tiny)
+
+// ── Tabla de estado (esquina superior derecha) ─────────────
+var table info = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 20), border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "Regimen", text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 0, regimeTxt, text_color=regimeCol, text_size=size.small)
+    table.cell(info, 0, 1, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 1, str.tostring(math.round(rsi)), text_color=color.white, text_size=size.small)
+    table.cell(info, 0, 2, "Vol vs media", text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 2, str.tostring(math.round(volume/volMA*100)) + "%", text_color=volHigh ? color.green : color.gray, text_size=size.small)
+    table.cell(info, 0, 3, "Señal", text_color=color.white, text_size=size.small)
+    sigTxt = longSignal ? "LONG" : shortSignal ? "SHORT" : "—"
+    sigCol = longSignal ? color.green : shortSignal ? color.red : color.gray
+    table.cell(info, 1, 3, sigTxt, text_color=sigCol, text_size=size.small)
+
+// ── Alertas (configurables desde TradingView) ──────────────
+alertcondition(longSignal, "Señal LONG", "CryptobotNico: LONG detectado (RSI bajo + volumen alto)")
+alertcondition(shortSignal, "Señal SHORT", "CryptobotNico: SHORT detectado (RSI alto + volumen alto)")

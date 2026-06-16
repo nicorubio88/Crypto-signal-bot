@@ -9,6 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from engine import run_analysis, build_global_summary
 from telegram_bot import notify_if_signal, format_signal_message, send_message, format_regime_change_message, format_reversal_message
 from tracker import save_signal, update_outcomes, get_stats, get_all_signals, get_evolution_report
+import paper_trading as paper
 from operations import (
     create_operation, close_operation, update_levels,
     edit_operation, delete_operation,
@@ -116,6 +117,8 @@ def refresh_data():
     for r in clean:
         if r.get("error"): continue
         update_outcomes(r["name"], r["price"])
+        # Paper trading: actualizar abiertos (chequea SL/TP/inversion) y abrir nuevos
+        paper.update_paper_trades(r["name"], r["price"], r.get("signal"), r.get("reversal"))
         name = r["name"]
         signal = r["signal"]
         prev = state["last_signals"].get(name, "")
@@ -123,6 +126,7 @@ def refresh_data():
         changed = signal != prev
         if is_actionable and changed:
             save_signal(r)
+            paper.open_paper_trade(r)  # abrir operacion ficticia siguiendo la señal
             send_message(format_signal_message(r))
             print(f"  Nueva señal: {name} -> {signal}")
             state["last_signals"][name] = signal
@@ -170,14 +174,42 @@ def refresh_data():
     print(f"  Analisis completo — {len(results)} activos | {len(open_ops)} ops abiertas")
 
 
+def check_paper_realtime():
+    """Chequeo rapido de SL/TP de paper trades, corre siempre (haya o no ops manuales)."""
+    open_paper = paper.get_paper_stats()["open_trades"]
+    if not open_paper:
+        return
+    try:
+        from engine import SYMBOLS, fetch_candles
+        seen = set()
+        for t in open_paper:
+            asset = t["asset"]
+            if asset in seen:
+                continue
+            seen.add(asset)
+            symbol = SYMBOLS.get(asset)
+            if not symbol:
+                continue
+            try:
+                df = fetch_candles(symbol, "1h", limit=2)
+                last_price = float(df.iloc[-1]["close"])
+                cached = next((r for r in state["results"] if r.get("name") == asset), {})
+                paper.update_paper_trades(asset, last_price, cached.get("signal"), cached.get("reversal"))
+            except Exception as e:
+                print(f"  Error paper check {asset}: {e}")
+    except Exception as e:
+        print(f"  Error en check_paper_realtime: {e}")
+
+
 def check_operations_realtime():
     """
     Chequeo rapido cada 2 min para alertas de SL/TP/liquidacion.
     Usa precios actuales de Kraken sin recalcular indicadores.
     """
+    check_paper_realtime()  # paper trades primero (independiente de ops manuales)
     open_ops = get_open_operations()
     if not open_ops:
-        return  # nada que chequear
+        return  # nada mas que chequear
 
     try:
         # Fetch solo precios actuales (1 vela 1h, mucho mas rapido que analisis completo)
@@ -244,6 +276,33 @@ def api_refresh():
 @app.route("/api/stats")
 def api_stats():
     return Response(json.dumps(sanitize(get_stats())), mimetype="application/json")
+
+
+@app.route("/api/backtest/<asset>")
+def api_backtest(asset):
+    """Corre backtest de la logica sobre histrico de Kraken para un activo."""
+    import backtest as bt
+    from engine import SYMBOLS, fetch_candles, calculate_indicators, calculate_score, get_levels, get_adaptive_threshold
+    asset = asset.upper()
+    symbol = SYMBOLS.get(asset)
+    if not symbol:
+        return Response(json.dumps({"error": f"Activo {asset} no reconocido"}), mimetype="application/json")
+    try:
+        df = fetch_candles(symbol, "4h", limit=720)  # ~120 dias de velas 4h
+        df = calculate_indicators(df)
+        result = bt.run_backtest(df, calculate_score, get_levels, None, get_adaptive_threshold)
+        result["asset"] = asset
+        result["candles_analyzed"] = len(df)
+        return Response(json.dumps(sanitize(result), indent=2), mimetype="application/json")
+    except Exception as e:
+        return Response(json.dumps({"error": str(e)}), mimetype="application/json")
+
+
+@app.route("/api/paper")
+def api_paper():
+    """Estadisticas del paper trading automatico (validacion sin riesgo)."""
+    return Response(json.dumps(sanitize(paper.get_paper_stats()), indent=2),
+                    mimetype="application/json")
 
 
 @app.route("/api/evolution")

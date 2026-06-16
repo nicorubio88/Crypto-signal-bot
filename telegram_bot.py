@@ -41,6 +41,61 @@ def send_message(text: str) -> bool:
         return False
 
 
+def build_executable_block(result: dict) -> str:
+    """
+    Arma un bloque ACCIONABLE: entrada, stop, objetivos y tamaño ya calculado
+    segun el capital y riesgo del config. Pensado para copiar a Binance rapido
+    y resolver el desfasaje entre que sale la señal y se ejecuta.
+    """
+    signal = result.get("signal", "")
+    direction = "LONG" if "LONG" in signal else "SHORT" if "SHORT" in signal else None
+    if not direction:
+        return ""
+
+    levels = result.get("levels", {})
+    price = result.get("price", 0)
+    if direction == "LONG":
+        sl, tp1, tp2, tp3 = levels.get("stop_long"), levels.get("tp1_long"), levels.get("tp2_long"), levels.get("tp3_long")
+    else:
+        sl, tp1, tp2, tp3 = levels.get("stop_short"), levels.get("tp1_short"), levels.get("tp2_short"), levels.get("tp3_short")
+    if sl is None:
+        return ""
+
+    cfg = load_config()
+    capital  = cfg.get("capital_disponible", 10000)
+    risk_pct = cfg.get("risk_pct", 0.025)
+    leverage = cfg.get("default_leverage", 3)
+
+    # Calculo de tamaño por riesgo
+    stop_distance = abs(price - sl) / price if price > 0 else 0
+    risk_amount = capital * risk_pct
+    position_usd = risk_amount / stop_distance if stop_distance > 0 else 0
+    contracts = position_usd / price if price > 0 else 0
+    margin = position_usd / leverage if leverage > 0 else position_usd
+
+    def fp(p):
+        if p is None: return "—"
+        if abs(p) >= 1000: return f"${p:,.2f}"
+        if abs(p) >= 10: return f"${p:.2f}"
+        return f"${p:.4f}"
+
+    return "\n".join([
+        "",
+        "──────────────────",
+        f"LISTO PARA EJECUTAR ({direction})",
+        f"  Entrada:  {fp(price)}",
+        f"  Stop:     {fp(sl)}  (riesgo {round(stop_distance*100,2)}%)",
+        f"  TP1 (40%): {fp(tp1)}",
+        f"  TP2 (40%): {fp(tp2)}",
+        f"  TP3 (20%): {fp(tp3)}",
+        "",
+        f"  Tamaño: {fp(position_usd)} ({round(contracts,4)} {result.get('name','')})",
+        f"  Margen {leverage}x: {fp(margin)}",
+        f"  Riesgo asumido: {fp(risk_amount)} ({round(risk_pct*100,1)}% de {fp(capital)})",
+        "──────────────────",
+    ])
+
+
 def format_signal_message(result: dict) -> str:
     """Formatea el mensaje de señal para Telegram — sin emojis ni HTML."""
     signal = result["signal"]
@@ -144,6 +199,11 @@ def format_signal_message(result: dict) -> str:
         lines.append(f"  TP2 (40%): {fmt_price(tp2)}")
         lines.append(f"  TP3 (20%): {fmt_price(tp3)}")
         lines.append(f"  R/R ratio: 1:{rr}")
+
+    # Bloque ejecutable: entrada/stop/tamaño listos para copiar a Binance
+    exec_block = build_executable_block(result)
+    if exec_block:
+        lines.append(exec_block)
 
     lines.append("")
     lines.append(result.get("updated_at", ""))

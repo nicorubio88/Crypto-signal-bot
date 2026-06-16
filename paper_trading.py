@@ -1,0 +1,281 @@
+"""
+Paper trading automatico.
+El bot abre operaciones FICTICIAS siguiendo sus propias señales, con SL/TP,
+y mide el resultado real de operar esas señales — sin arriesgar plata.
+
+Esto es distinto del tracker (que mide si el precio subio/bajo a 4h/24h/72h).
+Aca se simula operativa real: se entra, se pone stop y objetivo, y se cierra
+cuando toca uno de los dos o cuando la señal se invierte. Da la validacion
+honesta que falta antes de pensar en ejecucion real.
+"""
+
+import sqlite3
+import json
+from pathlib import Path
+from datetime import datetime
+
+DB_PATH = Path(__file__).parent / "data" / "paper_trades.db"
+
+# Comisiones realistas (Binance taker ~0.05% por lado, ida + vuelta)
+FEE_PCT = 0.05
+
+# ── Reglas de salida (gatillos) ───────────────────────────────────────────────
+# Basado en los datos: la ventana buena es ~24H, el 72H se desploma.
+# El objetivo es cerrar ANTES de la zona donde la señal historicamente envejece mal.
+MAX_HOURS_OPEN     = 48     # gatillo 2: limite de tiempo (freno duro)
+TRAILING_GIVEBACK  = 0.40   # gatillo 3: si devuelve 40% de la ganancia maxima, cerrar
+MIN_PROFIT_TO_TRAIL = 1.0   # solo activa trailing si la ganancia maxima supero 1%
+
+
+def get_conn():
+    DB_PATH.parent.mkdir(exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_conn()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset        TEXT NOT NULL,
+            direction    TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'OPEN',
+
+            entry_price  REAL NOT NULL,
+            stop_loss    REAL,
+            take_profit  REAL,
+
+            exit_price   REAL,
+            exit_reason  TEXT,
+            pnl_pct      REAL,
+            pnl_pct_net  REAL,
+
+            -- contexto del bot al abrir
+            score        REAL,
+            confidence   TEXT,
+            regime       TEXT,
+            adx          REAL,
+
+            opened_at    TEXT NOT NULL,
+            closed_at    TEXT,
+            best_price   REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
+        CREATE INDEX IF NOT EXISTS idx_paper_asset  ON paper_trades(asset);
+    """)
+    # Migracion idempotente: best_price para trailing (gatillo 3)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(paper_trades)")]
+    if "best_price" not in cols:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN best_price REAL")
+    conn.commit()
+    conn.close()
+
+
+def has_open_paper(asset: str) -> bool:
+    conn = get_conn()
+    r = conn.execute(
+        "SELECT COUNT(*) n FROM paper_trades WHERE asset=? AND status='OPEN'",
+        (asset,)
+    ).fetchone()
+    conn.close()
+    return r["n"] > 0
+
+
+def open_paper_trade(result: dict) -> dict:
+    """
+    Abre una operacion de papel a partir de una señal del bot.
+    Usa los niveles de SL/TP del propio analisis (TP1 como objetivo).
+    Una sola posicion de papel abierta por activo a la vez.
+    """
+    signal = result.get("signal", "")
+    direction = "LONG" if "LONG" in signal else "SHORT" if "SHORT" in signal else None
+    if not direction:
+        return {"ok": False, "error": "señal no operable"}
+
+    asset = result["name"]
+    if has_open_paper(asset):
+        return {"ok": False, "error": "ya hay paper abierto"}
+
+    entry = result["price"]
+    levels = result.get("levels", {})
+    if direction == "LONG":
+        sl = levels.get("stop_long")
+        tp = levels.get("tp1_long")
+    else:
+        sl = levels.get("stop_short")
+        tp = levels.get("tp1_short")
+
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO paper_trades
+            (asset, direction, entry_price, stop_loss, take_profit,
+             score, confidence, regime, adx, opened_at, best_price)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        asset, direction, entry, sl, tp,
+        result.get("score"), result.get("confidence", ""),
+        result.get("regime", ""), result.get("adx"),
+        datetime.utcnow().isoformat(), entry,
+    ))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "asset": asset, "direction": direction,
+            "entry": entry, "sl": sl, "tp": tp}
+
+
+def _close(conn, trade, exit_price, reason):
+    """Cierra un trade de papel y calcula PnL con y sin fees."""
+    entry = trade["entry_price"]
+    direction = trade["direction"]
+    if direction == "LONG":
+        pnl = (exit_price - entry) / entry * 100
+    else:
+        pnl = (entry - exit_price) / entry * 100
+    pnl_net = pnl - (FEE_PCT * 2)  # ida + vuelta
+
+    conn.execute("""
+        UPDATE paper_trades SET
+            status='CLOSED', exit_price=?, exit_reason=?,
+            pnl_pct=?, pnl_pct_net=?, closed_at=?
+        WHERE id=?
+    """, (exit_price, reason, round(pnl, 3), round(pnl_net, 3),
+          datetime.utcnow().isoformat(), trade["id"]))
+
+
+def update_paper_trades(asset: str, current_price: float, current_signal: str = None,
+                        reversal: dict = None):
+    """
+    Para los paper abiertos del activo, chequea las condiciones de cierre.
+
+    Orden de prioridad de cierre:
+      1. Stop loss / Take profit (niveles fijos)
+      2. Señal invertida (el bot cambio de opinion)
+      3. GATILLO GIRO: detector de reversion en contra de la posicion
+      4. GATILLO TIEMPO: la señal lleva mas de MAX_HOURS_OPEN abierta
+      5. GATILLO TRAILING: devolvio mucho de la ganancia maxima
+
+    Los gatillos 3-5 atacan el problema medido: las señales envejecen mal
+    pasadas ~24-48h. Se busca cerrar antes de la zona donde se desploma el 72H.
+    """
+    conn = get_conn()
+    open_trades = conn.execute(
+        "SELECT * FROM paper_trades WHERE asset=? AND status='OPEN'",
+        (asset,)
+    ).fetchall()
+
+    now = datetime.utcnow()
+
+    for t in open_trades:
+        direction = t["direction"]
+        entry = t["entry_price"]
+        sl = t["stop_loss"]
+        tp = t["take_profit"]
+        closed = False
+
+        # ── 1. Stop loss / Take profit ──
+        if direction == "LONG":
+            if sl and current_price <= sl:
+                _close(conn, t, sl, "stop_loss"); closed = True
+            elif tp and current_price >= tp:
+                _close(conn, t, tp, "take_profit"); closed = True
+        else:  # SHORT
+            if sl and current_price >= sl:
+                _close(conn, t, sl, "stop_loss"); closed = True
+            elif tp and current_price <= tp:
+                _close(conn, t, tp, "take_profit"); closed = True
+        if closed:
+            continue
+
+        # ── 2. Señal invertida ──
+        if current_signal:
+            opp = ("SHORT" in current_signal and direction == "LONG") or \
+                  ("LONG" in current_signal and direction == "SHORT")
+            if opp:
+                _close(conn, t, current_price, "señal_invertida")
+                continue
+
+        # ── 3. GATILLO GIRO: detector de reversion en contra ──
+        # Si tenemos SHORT y el detector marca giro ALCISTA (o LONG y giro BAJISTA)
+        if reversal and reversal.get("reversing"):
+            rev_dir = reversal.get("direction")
+            against = (direction == "SHORT" and rev_dir == "ALCISTA") or \
+                      (direction == "LONG" and rev_dir == "BAJISTA")
+            if against:
+                _close(conn, t, current_price, "giro_tendencia")
+                continue
+
+        # ── 4. GATILLO TIEMPO: señal demasiado vieja ──
+        opened = datetime.fromisoformat(t["opened_at"])
+        hours_open = (now - opened).total_seconds() / 3600
+        if hours_open >= MAX_HOURS_OPEN:
+            _close(conn, t, current_price, "tiempo_max")
+            continue
+
+        # ── 5. GATILLO TRAILING: protege ganancia ──
+        # Actualizar el mejor precio alcanzado y chequear si devolvio mucho
+        best = t["best_price"] if t["best_price"] is not None else entry
+        if direction == "LONG":
+            best = max(best, current_price)
+            max_profit = (best - entry) / entry * 100
+            cur_profit = (current_price - entry) / entry * 100
+        else:  # SHORT
+            best = min(best, current_price)
+            max_profit = (entry - best) / entry * 100
+            cur_profit = (entry - current_price) / entry * 100
+
+        # Guardar el mejor precio actualizado
+        conn.execute("UPDATE paper_trades SET best_price=? WHERE id=?", (best, t["id"]))
+
+        # Si la ganancia maxima supero el minimo y devolvio TRAILING_GIVEBACK de ella
+        if max_profit >= MIN_PROFIT_TO_TRAIL:
+            giveback = (max_profit - cur_profit) / max_profit if max_profit > 0 else 0
+            if giveback >= TRAILING_GIVEBACK:
+                _close(conn, t, current_price, "trailing")
+                continue
+
+    conn.commit()
+    conn.close()
+
+
+def get_paper_stats() -> dict:
+    """Estadisticas de las operaciones de papel cerradas + abiertas actuales."""
+    conn = get_conn()
+
+    closed = conn.execute(
+        "SELECT * FROM paper_trades WHERE status='CLOSED' ORDER BY closed_at DESC"
+    ).fetchall()
+    open_now = conn.execute(
+        "SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY opened_at DESC"
+    ).fetchall()
+
+    n = len(closed)
+    wins = sum(1 for t in closed if (t["pnl_pct_net"] or 0) > 0)
+    total_net = sum((t["pnl_pct_net"] or 0) for t in closed)
+    avg_win = [t["pnl_pct_net"] for t in closed if (t["pnl_pct_net"] or 0) > 0]
+    avg_loss = [t["pnl_pct_net"] for t in closed if (t["pnl_pct_net"] or 0) <= 0]
+
+    # Desglose por motivo de cierre
+    reasons = {}
+    for t in closed:
+        r = t["exit_reason"] or "?"
+        reasons[r] = reasons.get(r, 0) + 1
+
+    return {
+        "closed_count": n,
+        "open_count": len(open_now),
+        "win_rate": round(wins / n * 100, 1) if n else None,
+        "wins": wins,
+        "losses": n - wins,
+        "total_pnl_net_pct": round(total_net, 2),
+        "avg_win_pct": round(sum(avg_win) / len(avg_win), 2) if avg_win else None,
+        "avg_loss_pct": round(sum(avg_loss) / len(avg_loss), 2) if avg_loss else None,
+        "by_reason": reasons,
+        "open_trades": [dict(t) for t in open_now],
+        "recent_closed": [dict(t) for t in closed[:15]],
+        "note": "Operativa simulada con SL/TP y fees. Mide el bot operando en vivo, sin riesgo.",
+    }
+
+
+init_db()
