@@ -14,6 +14,8 @@
   .tab { padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; border: 1px solid #30363d; background: #161b22; color: #8b949e; transition: all 0.2s; }
   .tab.active { background: #58a6ff; color: #0d1117; border-color: #58a6ff; font-weight: 600; }
   .btn { background: #21262d; border: 1px solid #30363d; color: #58a6ff; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.82rem; }
+  .tf-btn { background: #161b22; border: 1px solid #30363d; color: #8b949e; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 600; transition: all 0.15s; }
+  .tf-btn.tf-active { background: #388bfd; color: #fff; border-color: #388bfd; }
   .btn:hover { background: #30363d; }
   .btn-primary { background: #2ea043; color: white; border-color: #2ea043; }
   .btn-danger { background: #da3633; color: white; border-color: #da3633; }
@@ -206,7 +208,15 @@
   <div class="tab" onclick="showTab('history')">Historial señales</div>
 </div>
 
-<div id="tab-signals"><div id="global-summary"></div><div id="scenarios-panel"></div><div id="grid" class="grid"><div class="loading">Cargando...</div></div></div>
+<div id="tab-signals"><div id="global-summary"></div>
+<div style="display:flex;gap:6px;align-items:center;margin-bottom:14px">
+  <span style="font-size:0.7rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-right:4px">Marco</span>
+  <button class="tf-btn" data-tf="1h" onclick="setTimeframe('1h')">1H</button>
+  <button class="tf-btn tf-active" data-tf="4h" onclick="setTimeframe('4h')">4H</button>
+  <button class="tf-btn" data-tf="1d" onclick="setTimeframe('1d')">1D</button>
+  <span style="font-size:0.62rem;color:#6e7681;margin-left:8px">1H/1D recalculan al toque · señales y paper se registran en 4H</span>
+</div>
+<div id="scenarios-panel"></div><div id="grid" class="grid"><div class="loading">Cargando...</div></div></div>
 
 <div id="tab-ops" class="hidden">
   <div id="ops-summary"></div>
@@ -380,6 +390,12 @@
 
 <script>
 let currentTab = 'signals';
+let selectedTF = '4h';
+function setTimeframe(tf) {
+  selectedTF = tf;
+  document.querySelectorAll('.tf-btn').forEach(b => b.classList.toggle('tf-active', b.dataset.tf === tf));
+  loadData();
+}
 let marketData = [];
 let openOpsCache = [];
 let editingOpId = null;
@@ -577,7 +593,9 @@ function toggleDetail(name) {
 
 async function loadData() {
   try {
-    const r = await fetch('/api/data');
+    const grid = document.getElementById('grid');
+    if (selectedTF !== '4h') grid.innerHTML = '<div class="loading">Recalculando en ' + selectedTF.toUpperCase() + '... (tarda unos segundos)</div>';
+    const r = await fetch('/api/data?tf=' + selectedTF);
     const data = await r.json();
     marketData = data.results || [];
     document.getElementById('last-update').textContent = 'Actualizado: ' + (data.last_update || '—');
