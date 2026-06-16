@@ -979,6 +979,111 @@ def calc_position_size(price: float, stop: float, capital: float = 10000,
 
 # ── Analisis completo ─────────────────────────────────────────────────────────
 
+def detect_short_term_setup(df_1h: pd.DataFrame, trend_1d: str, trend_1w: str,
+                            pivots: dict, current_price: float) -> dict:
+    """
+    Detecta el TIMING de corto plazo (1H) dentro del contexto del marco grande.
+
+    El problema que resuelve: el bot opera mirando el marco grande (4H/1D/1W),
+    asi que cuando el precio rebota en 1H dentro de una tendencia bajista mayor,
+    NO lo detecta — y ese rebote es justo una oportunidad de entrada/salida.
+
+    Clasifica la situacion de corto plazo en:
+      - REBOTE: el 1H gira EN CONTRA del marco grande (pullback aprovechable)
+      - CONTINUACION: el 1H confirma el marco grande (entrada a favor de tendencia)
+      - NEUTRO: el 1H no da señal clara de timing
+
+    Devuelve tambien si esta "en zona" (cerca de soporte/resistencia), que es
+    donde un rebote tiene mas sentido.
+    """
+    if df_1h is None or len(df_1h) < 30:
+        return {"setup": "NEUTRO", "tipo": None, "en_zona": False,
+                "direction_1h": None, "detail": "", "strength": 0}
+
+    row = df_1h.iloc[-2]
+
+    # Direccion del marco grande (contexto)
+    big_bull = "ALCISTA" in (trend_1w or "") or "ALCISTA" in (trend_1d or "")
+    big_bear = "BAJISTA" in (trend_1w or "") or "BAJISTA" in (trend_1d or "")
+
+    # ── Direccion del 1H por momentum (no solo tendencia: queremos el GIRO) ──
+    rsi6 = row.get("RSI6")
+    macd_hist = row.get("MACD_HIST")
+    ema20 = row.get("EMA20")
+
+    # Señales de impulso alcista de corto plazo
+    bull_1h = 0
+    bear_1h = 0
+    if pd.notna(rsi6):
+        if rsi6 > 55: bull_1h += 1
+        elif rsi6 < 45: bear_1h += 1
+    if pd.notna(macd_hist):
+        # comparar con la barra previa para ver direccion del histograma
+        if len(df_1h) >= 3:
+            prev_h = df_1h.iloc[-3].get("MACD_HIST")
+            if pd.notna(prev_h):
+                if macd_hist > prev_h: bull_1h += 1
+                elif macd_hist < prev_h: bear_1h += 1
+    if pd.notna(ema20) and current_price:
+        if current_price > ema20: bull_1h += 1
+        elif current_price < ema20: bear_1h += 1
+
+    if bull_1h > bear_1h:
+        dir_1h = "ALCISTA"
+    elif bear_1h > bull_1h:
+        dir_1h = "BAJISTA"
+    else:
+        dir_1h = "LATERAL"
+    strength = abs(bull_1h - bear_1h)  # 0 a 3
+
+    # ── En zona: cerca de un pivot (soporte/resistencia) ──
+    en_zona = False
+    zona_tipo = None
+    if pivots and current_price:
+        for key, label in [("s1", "soporte"), ("s2", "soporte"),
+                           ("r1", "resistencia"), ("r2", "resistencia"),
+                           ("pivot", "pivote")]:
+            lvl = pivots.get(key)
+            if lvl and abs(current_price - lvl) / current_price < 0.012:  # dentro de 1.2%
+                en_zona = True
+                zona_tipo = label
+                break
+
+    # ── Clasificacion del setup ──
+    setup = "NEUTRO"
+    tipo = None
+    detail = ""
+
+    if big_bear and dir_1h == "ALCISTA" and strength >= 2:
+        setup = "REBOTE"
+        tipo = "rebote alcista en tendencia bajista"
+        detail = "El fondo es bajista pero el 1H rebota. Oportunidad de LONG corto " + \
+                 ("(en zona de soporte)" if en_zona and zona_tipo=="soporte" else "(vigilar, sin confirmacion de nivel)")
+    elif big_bull and dir_1h == "BAJISTA" and strength >= 2:
+        setup = "REBOTE"
+        tipo = "pullback bajista en tendencia alcista"
+        detail = "El fondo es alcista pero el 1H corrige. Oportunidad de SHORT corto " + \
+                 ("(en zona de resistencia)" if en_zona and zona_tipo=="resistencia" else "(vigilar, sin confirmacion de nivel)")
+    elif big_bear and dir_1h == "BAJISTA" and strength >= 2:
+        setup = "CONTINUACION"
+        tipo = "continuacion bajista"
+        detail = "El 1H confirma la tendencia bajista mayor. Entrada SHORT a favor de tendencia."
+    elif big_bull and dir_1h == "ALCISTA" and strength >= 2:
+        setup = "CONTINUACION"
+        tipo = "continuacion alcista"
+        detail = "El 1H confirma la tendencia alcista mayor. Entrada LONG a favor de tendencia."
+
+    return {
+        "setup": setup,           # REBOTE / CONTINUACION / NEUTRO
+        "tipo": tipo,
+        "direction_1h": dir_1h,   # hacia donde se mueve el corto plazo
+        "strength": strength,     # 0-3, cuantas señales de 1H alinean
+        "en_zona": en_zona,
+        "zona_tipo": zona_tipo,
+        "detail": detail,
+    }
+
+
 def analyze(name: str, symbol: str) -> dict:
     try:
         df_1h = fetch_candles(symbol, "1h", limit=200)
@@ -1033,6 +1138,7 @@ def analyze(name: str, symbol: str) -> dict:
         close_long  = get_close_signal(df_4h, "LONG")
         close_short = get_close_signal(df_4h, "SHORT")
         reversal = detect_trend_reversal(df_4h, regime_data["regime"])
+        short_setup = detect_short_term_setup(df_1h, trend_1d, trend_1w, pivots, df_4h.iloc[-2]["close"])
 
         target_for_signal = "ALCISTA" if "LONG" in signal_data["signal"] else "BAJISTA" if "SHORT" in signal_data["signal"] else None
         confirm_1h = (trend_1h == target_for_signal) if target_for_signal else False
@@ -1086,6 +1192,7 @@ def analyze(name: str, symbol: str) -> dict:
             "close_long":  close_long,
             "close_short": close_short,
             "reversal":    reversal,
+            "short_setup": short_setup,
             "updated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
             "error": None,
         }

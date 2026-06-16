@@ -211,6 +211,42 @@ def format_signal_message(result: dict) -> str:
     return "\n".join(lines)
 
 
+def format_setup_message(result: dict) -> str:
+    """
+    Alerta de setup de corto plazo (timing 1H): rebote o continuacion detectado
+    dentro del contexto del marco grande. Sirve para timing de entrada/salida.
+    """
+    name = result.get("name", "?")
+    price = result.get("price", 0)
+    st = result.get("short_setup", {})
+    setup = st.get("setup")
+
+    def fp(p):
+        if p is None: return "—"
+        if abs(p) >= 1000: return f"${p:,.2f}"
+        if abs(p) >= 10: return f"${p:.2f}"
+        return f"${p:.4f}"
+
+    titulo = "REBOTE DE CORTO PLAZO" if setup == "REBOTE" else "CONTINUACION DE CORTO PLAZO"
+    lines = [
+        f"=== {titulo} - {name}/USDT ===",
+        f"Precio: {fp(price)}",
+        "",
+        f"Contexto mayor: 1W {result.get('trend_1w','—')} / 1D {result.get('trend_1d','—')}",
+        f"Corto plazo (1H): {st.get('direction_1h','—')} (fuerza {st.get('strength',0)}/3)",
+        "",
+        st.get("detail", ""),
+    ]
+    if st.get("en_zona"):
+        lines.append(f"En zona de {st.get('zona_tipo','nivel')} — el setup tiene mas validez.")
+    lines.append("")
+    lines.append("Nota: es TIMING de corto plazo, no la señal principal del bot.")
+    lines.append("Si operas esto, usa stops ajustados y horizonte corto.")
+    lines.append("")
+    lines.append(result.get("updated_at", ""))
+    return "\n".join(lines)
+
+
 def format_reversal_message(result: dict) -> str:
     """
     Alerta de posible giro de tendencia (agotamiento detectado).

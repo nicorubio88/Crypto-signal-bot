@@ -7,7 +7,7 @@ import numpy as np
 from flask import Flask, render_template, Response, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from engine import run_analysis, build_global_summary
-from telegram_bot import notify_if_signal, format_signal_message, send_message, format_regime_change_message, format_reversal_message
+from telegram_bot import notify_if_signal, format_signal_message, send_message, format_regime_change_message, format_reversal_message, format_setup_message
 from tracker import save_signal, update_outcomes, get_stats, get_all_signals, get_evolution_report
 import paper_trading as paper
 from operations import (
@@ -31,6 +31,7 @@ state = {
     "last_signals": {},
     "last_regimes": {},  # tracking de regimen anterior por activo (cambio de regimen)
     "last_reversal": {},  # tracking de alerta de giro ya enviada por activo
+    "last_setup": {},  # tracking de setup de corto plazo por activo
     "operation_alerts_sent": {},  # tracking de alertas ya enviadas por operacion
 }
 
@@ -156,6 +157,19 @@ def refresh_data():
             state["last_reversal"][name] = True
         else:
             state["last_reversal"][name] = False
+
+        # ── Alerta de setup de corto plazo (timing 1H: rebote / continuacion) ──
+        st = r.get("short_setup", {})
+        setup = st.get("setup")
+        if setup in ("REBOTE", "CONTINUACION"):
+            # avisar solo cuando cambia el setup (no repetir el mismo cada ciclo)
+            prev_setup = state["last_setup"].get(name)
+            if setup != prev_setup:
+                send_message(format_setup_message(r))
+                print(f"  Setup 1H: {name} -> {setup} ({st.get('tipo')})")
+            state["last_setup"][name] = setup
+        else:
+            state["last_setup"][name] = None
 
     CACHE_PATH.parent.mkdir(exist_ok=True)
     with open(CACHE_PATH, "w") as f:
