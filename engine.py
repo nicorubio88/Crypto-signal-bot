@@ -1084,7 +1084,13 @@ def detect_short_term_setup(df_1h: pd.DataFrame, trend_1d: str, trend_1w: str,
     }
 
 
-def analyze(name: str, symbol: str) -> dict:
+def analyze(name: str, symbol: str, main_tf: str = "4h") -> dict:
+    """
+    Analiza un activo. Por defecto el marco principal es 4H (sobre el que se
+    calcula score, señal, niveles y pivots). main_tf puede ser '1h', '4h' o '1d'
+    para recalcular en otro marco — esto es SOLO para la vista del dashboard;
+    el registro de señales y el paper trading siempre usan 4H.
+    """
     try:
         df_1h = fetch_candles(symbol, "1h", limit=200)
         time.sleep(0.5)
@@ -1103,11 +1109,15 @@ def analyze(name: str, symbol: str) -> dict:
         df_4h = add_daily_vwap(df_4h)
         df_1h = add_daily_vwap(df_1h)
 
+        # ── Marco principal: el que se usa para score/señal/niveles/pivots ──
+        # Default 4H. El selector del dashboard puede pedir 1h o 1d para mirar.
+        df_main = {"1h": df_1h, "4h": df_4h, "1d": df_1d}.get(main_tf, df_4h)
+
         trend_1h = get_trend(df_1h.iloc[-2])
         trend_1d = get_trend(df_1d.iloc[-2])
         trend_1w = get_trend(df_1w.iloc[-2])
 
-        score_data = calculate_score(df_4h)
+        score_data = calculate_score(df_main)
         adx_val = score_data["adx"] or 0
 
         # Funding rate (Binance) - sentimiento de perpetuos
@@ -1130,15 +1140,15 @@ def analyze(name: str, symbol: str) -> dict:
         # Régimen del mercado (diagnóstico independiente de la señal)
         regime_data = get_regime(trend_1w, trend_1d, trend_1h, adx_val)
 
-        levels = get_levels(df_4h)
-        pivots = calculate_pivots(df_4h)
-        last   = df_4h.iloc[-2]
+        levels = get_levels(df_main)
+        pivots = calculate_pivots(df_main)
+        last   = df_main.iloc[-2]
         price  = round(float(last["close"]), 4)
 
-        close_long  = get_close_signal(df_4h, "LONG")
-        close_short = get_close_signal(df_4h, "SHORT")
-        reversal = detect_trend_reversal(df_4h, regime_data["regime"])
-        short_setup = detect_short_term_setup(df_1h, trend_1d, trend_1w, pivots, df_4h.iloc[-2]["close"])
+        close_long  = get_close_signal(df_main, "LONG")
+        close_short = get_close_signal(df_main, "SHORT")
+        reversal = detect_trend_reversal(df_main, regime_data["regime"])
+        short_setup = detect_short_term_setup(df_1h, trend_1d, trend_1w, pivots, df_main.iloc[-2]["close"])
 
         target_for_signal = "ALCISTA" if "LONG" in signal_data["signal"] else "BAJISTA" if "SHORT" in signal_data["signal"] else None
         confirm_1h = (trend_1h == target_for_signal) if target_for_signal else False
@@ -1591,11 +1601,11 @@ def build_global_summary(results: list) -> dict:
     }
 
 
-def run_analysis() -> list:
+def run_analysis(main_tf: str = "4h") -> list:
     results = []
     for name, symbol in SYMBOLS.items():
         print(f"  Analizando {name}...")
-        results.append(analyze(name, symbol))
+        results.append(analyze(name, symbol, main_tf))
         time.sleep(1)
 
     # Aplicar filtro de correlacion con BTC (ajusta señales de altcoins)

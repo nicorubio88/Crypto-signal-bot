@@ -269,10 +269,28 @@ def index():
 
 @app.route("/api/data")
 def api_data():
+    # Selector de timeframe (solo para vista). Default 4h = cache del scheduler.
+    # 1h o 1d se recalculan en vivo SIN tocar registro de señales ni paper trading.
+    tf = request.args.get("tf", "4h")
+    if tf not in ("1h", "4h", "1d"):
+        tf = "4h"
+
+    if tf == "4h":
+        results = state["results"]
+        last_update = state["last_update"]
+        global_summary = state["global_summary"]
+    else:
+        # Recalculo on-demand en el marco pedido (tarda unos segundos)
+        from engine import run_analysis, build_global_summary
+        results = sanitize(run_analysis(main_tf=tf))
+        last_update = datetime.now().strftime("%Y-%m-%d %H:%M UTC") + f" (vista {tf})"
+        global_summary = build_global_summary(results)
+
     return Response(json.dumps(sanitize({
-        "results": state["results"],
-        "last_update": state["last_update"],
-        "global_summary": state["global_summary"],
+        "results": results,
+        "last_update": last_update,
+        "global_summary": global_summary,
+        "timeframe": tf,
         "config": {
             "capital": load_config().get("capital_disponible", 10000),
             "risk_pct": load_config().get("risk_pct", 0.025),
