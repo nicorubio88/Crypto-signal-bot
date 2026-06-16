@@ -202,6 +202,7 @@
   <div class="tab active" onclick="showTab('signals')">Señales en vivo</div>
   <div class="tab" onclick="showTab('ops')">Mis operaciones</div>
   <div class="tab" onclick="showTab('stats')">Acertividad</div>
+  <div class="tab" onclick="showTab('paper')">Paper trading</div>
   <div class="tab" onclick="showTab('history')">Historial señales</div>
 </div>
 
@@ -220,6 +221,17 @@
 
 <div id="tab-stats" class="hidden">
   <div id="stats-grid" class="stats-grid"><div class="loading">Cargando...</div></div>
+</div>
+
+<div id="tab-paper" class="hidden">
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:16px">
+    <div style="font-size:0.85rem;color:#adbac7;line-height:1.5">El bot abre operaciones <b>ficticias</b> siguiendo sus señales, con stop y objetivo, y mide el resultado real de operarlas — sin arriesgar plata. Es la validación honesta antes de pensar en ejecución real.</div>
+  </div>
+  <div id="paper-summary"></div>
+  <h2 style="font-size:1rem;color:#58a6ff;margin:20px 0 12px">Operaciones de papel abiertas</h2>
+  <div id="paper-open"></div>
+  <h2 style="font-size:1rem;color:#58a6ff;margin:24px 0 12px">Historial de papel</h2>
+  <div id="paper-closed"></div>
 </div>
 
 <div id="tab-history" class="hidden">
@@ -376,13 +388,14 @@ let closingOpId = null;
 function showTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach((t, i) => {
-    t.classList.toggle('active', ['signals','ops','stats','history'][i] === tab);
+    t.classList.toggle('active', ['signals','ops','stats','paper','history'][i] === tab);
   });
-  ['signals','ops','stats','history'].forEach(t => {
+  ['signals','ops','stats','paper','history'].forEach(t => {
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
   });
   if (tab === 'ops') loadOperations();
   if (tab === 'stats') loadStats();
+  if (tab === 'paper') loadPaper();
   if (tab === 'history') loadHistory();
 }
 
@@ -415,180 +428,138 @@ function fundingColor(impact) {
 
 function renderCard(r) {
   if (r.error) return `<div class="card"><div style="color:#da3633">${r.name}: ${r.error}</div></div>`;
-  const sc = sigClass(r.signal), bc = badgeClass(r.signal), fc = fillClass(r.signal);
-  const sw = scoreWidth(r.score, r.max_score);
+
   const isLong = r.signal?.includes('LONG'), isShort = r.signal?.includes('SHORT');
 
-  // REGIMEN del mercado (siempre visible, da contexto incluso en NEUTRAL)
-  const regimeHtml = r.regime ? `<div style="background:#0d1117;border-left:3px solid ${regimeColor(r.regime)};padding:8px 12px;border-radius:4px;margin-bottom:12px">
-    <div style="font-size:0.65rem;color:#8b949e;text-transform:uppercase;margin-bottom:3px">Régimen del mercado</div>
-    <div style="font-size:0.95rem;font-weight:700;color:${regimeColor(r.regime)}">${r.regime}</div>
-    <div style="font-size:0.72rem;color:#8b949e;margin-top:3px">${r.regime_description || ''}</div>
-    <div style="font-size:0.72rem;color:#e6edf3;margin-top:4px;font-style:italic">${r.regime_bias || ''}</div>
-  </div>` : '';
+  // ── ACCION propuesta (lo primero que se lee) ──
+  let action, actionColor, actionBg;
+  if (isLong)      { action = 'LONG';    actionColor = '#3fb950'; actionBg = 'rgba(63,185,80,0.12)'; }
+  else if (isShort){ action = 'SHORT';   actionColor = '#f85149'; actionBg = 'rgba(248,81,73,0.12)'; }
+  else             { action = 'ESPERAR'; actionColor = '#8b949e'; actionBg = 'rgba(139,148,158,0.10)'; }
 
-  const trendsHtml = `<div class="trends-row">
-    <span class="trend-pill ${trendClass(r.trend_1w)}">1W: ${r.trend_1w || '—'}</span>
-    <span class="trend-pill ${trendClass(r.trend_1d)}">1D: ${r.trend_1d || '—'}</span>
-    <span class="trend-pill ${trendClass(r.trend_1h)}">1H: ${r.trend_1h || '—'}</span>
-  </div>`;
+  // ── ESTADO del precio: combina las 3 tendencias en una direccion clara ──
+  const trends = [r.trend_1w, r.trend_1d, r.trend_1h];
+  const ups = trends.filter(t => t === 'ALCISTA').length;
+  const downs = trends.filter(t => t === 'BAJISTA').length;
+  let estado, flecha, estadoColor;
+  if (ups >= 2 && ups > downs)        { estado = 'Subiendo';      flecha = '↑'; estadoColor = '#3fb950'; }
+  else if (downs >= 2 && downs > ups) { estado = 'Cayendo';       flecha = '↓'; estadoColor = '#f85149'; }
+  else                                { estado = 'Lateralizando'; flecha = '→'; estadoColor = '#d29922'; }
 
-  const adxHtml = r.adx != null ? `<div class="adx-row">
-    <span class="adx-label">ADX:</span>
-    <span class="adx-value ${adxClass(r.adx)}">${r.adx}</span>
-    <span style="margin-left:8px;font-size:0.7rem;color:#8b949e">${r.market_trending ? 'Tendencia clara' : 'Mercado lateral'}</span>
-    <span style="margin-left:auto;font-size:0.7rem;color:#8b949e">Umbral: ±${r.threshold_used || 9}</span>
-  </div>` : '';
+  // ── SEMAFOROS de los indicadores clave (verde/amarillo/rojo) ──
+  // Tendencia general
+  const semTrend = (ups>=2) ? 'g' : (downs>=2) ? 'r' : 'y';
+  // Momentum RSI(6): >55 alcista, <45 bajista, medio neutro
+  const semRsi = (r.rsi6==null) ? 'y' : (r.rsi6>55 ? 'g' : r.rsi6<45 ? 'r' : 'y');
+  // Fuerza ADX: >=30 fuerte, 25-30 medio, <25 debil
+  const semAdx = (r.adx==null) ? 'y' : (r.adx>=30 ? 'g' : r.adx>=25 ? 'y' : 'r');
+  // MACD histograma: positivo verde, negativo rojo
+  const semMacd = (r.macd_hist==null) ? 'y' : (r.macd_hist>0 ? 'g' : 'r');
+  // Volumen / OBV
+  const semObv = (r.obv_trend==='ALCISTA') ? 'g' : (r.obv_trend==='BAJISTA') ? 'r' : 'y';
 
-  // Resumen en lenguaje claro (interpretacion de los indicadores)
-  const summaryHtml = r.summary ? `<div style="background:#0d1117;border-radius:6px;padding:10px 12px;margin-bottom:12px;border-left:3px solid #388bfd">
-    <div style="font-size:0.62rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Lectura del bot</div>
-    <div style="font-size:0.82rem;color:#adbac7;line-height:1.45">${r.summary}</div>
-  </div>` : '';
+  const semColor = {g:'#3fb950', y:'#d29922', r:'#f85149'};
+  const sem = (label, val) => `<div style="display:flex;flex-direction:column;align-items:center;gap:3px;flex:1">
+      <div style="width:12px;height:12px;border-radius:50%;background:${semColor[val]}"></div>
+      <div style="font-size:0.6rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.3px">${label}</div>
+    </div>`;
 
-  // Alerta de posible giro de tendencia (agotamiento)
+  // ── Alerta de giro (solo si esta activa) ──
   const rev = r.reversal || {};
-  const revHtml = (rev.reversing) ? `<div style="background:#2d2100;border:1px solid #bb8009;border-radius:6px;padding:10px 12px;margin-bottom:12px">
-    <div style="font-size:0.7rem;color:#f0b429;font-weight:700;margin-bottom:4px">POSIBLE GIRO DE TENDENCIA → ${rev.direction || ''} (fuerza ${rev.reversal_score}/100)</div>
-    <div style="font-size:0.74rem;color:#adbac7;line-height:1.4">${(rev.signals||[]).map(s=>'• '+s).join('<br>')}</div>
-    <div style="font-size:0.66rem;color:#8b949e;margin-top:5px;font-style:italic">Alerta temprana, no confirmación. Vigilá el próximo cierre.</div>
-  </div>` : '';
+  const giroChip = rev.reversing
+    ? `<span style="font-size:0.62rem;background:#2d2100;color:#f0b429;border:1px solid #bb8009;padding:2px 7px;border-radius:10px;white-space:nowrap">⟳ giro ${rev.direction||''}</span>`
+    : '';
 
-  // Funding rate (sentimiento de perpetuos)
-  const fundingHtml = r.funding?.available ? `<div style="background:#0d1117;border-radius:6px;padding:7px 10px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-    <div>
-      <span style="font-size:0.7rem;color:#8b949e">Funding rate (${(r.funding.source || 'exchange').charAt(0).toUpperCase() + (r.funding.source || 'exchange').slice(1)}):</span>
-      <span style="font-size:0.85rem;font-weight:600;color:${fundingColor(r.funding.signal_impact)};margin-left:6px">${r.funding.rate > 0 ? '+' : ''}${r.funding.rate}%</span>
+  // ── Nivel clave (pivot mas cercano) ──
+  const piv = r.pivots || {};
+  const nivelClave = piv.pivot ? `<span style="font-size:0.66rem;color:#8b949e">Nivel clave: <b style="color:#c9d1d9">$${fmt(piv.pivot)}</b></span>` : '';
+
+  return `
+  <div class="card" style="cursor:pointer" onclick="toggleDetail('${r.name}')">
+    <!-- Cabecera: activo + precio -->
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
+      <div style="font-size:1.05rem;font-weight:700;color:#e6edf3">${r.name}<span style="font-size:0.7rem;color:#8b949e">/USDT</span></div>
+      <div style="font-size:1.05rem;font-weight:700;color:#e6edf3">$${fmt(r.price)}</div>
     </div>
-    <div style="font-size:0.7rem;color:${fundingColor(r.funding.signal_impact)}">${r.funding.sentiment}</div>
-  </div>` : '';
 
-  // Filtro BTC aplicado
-  const btcFilterHtml = r.btc_filter_applied ? `<div style="background:#2d2100;border:1px solid #bb8009;color:#f0b429;border-radius:6px;padding:7px 10px;margin-bottom:10px;font-size:0.75rem">
-    <strong>Filtro BTC:</strong> ${r.btc_filter_reason}
-    ${r.signal_original ? `<div style="margin-top:3px;color:#8b949e">Señal original: ${r.signal_original}</div>` : ''}
-  </div>` : '';
-
-  const warningsHtml = (r.warnings || []).map(w => `<div class="warning">${w}</div>`).join('');
-
-  let divHtml = '';
-  if (r.divergence?.bullish) divHtml += `<div class="div-alert">Divergencia RSI alcista (+3 puntos)</div>`;
-  if (r.divergence?.bearish) divHtml += `<div class="div-alert bearish">Divergencia RSI bajista (-3 puntos)</div>`;
-  if (r.obv_divergence?.bullish) divHtml += `<div class="div-alert">Divergencia OBV alcista — acumulación detectada</div>`;
-  if (r.obv_divergence?.bearish) divHtml += `<div class="div-alert bearish">Divergencia OBV bajista — distribución detectada</div>`;
-  if (r.bb_squeeze) divHtml += `<div class="alert-rsi">Bollinger Squeeze — movimiento próximo</div>`;
-  if (r.rsi6_oversold) divHtml += `<div class="alert-rsi">RSI(6) sobreventa (${r.rsi6})</div>`;
-  if (r.rsi6_overbought) divHtml += `<div class="alert-rsi">RSI(6) sobrecompra (${r.rsi6})</div>`;
-
-  const lvl = r.levels || {};
-  const sl  = isLong ? lvl.stop_long  : isShort ? lvl.stop_short  : null;
-  const tp1 = isLong ? lvl.tp1_long   : isShort ? lvl.tp1_short   : null;
-  const tp2 = isLong ? lvl.tp2_long   : isShort ? lvl.tp2_short   : null;
-  const tp3 = isLong ? lvl.tp3_long   : isShort ? lvl.tp3_short   : null;
-  const levelsHtml = sl ? `<div class="levels">
-    <div class="levels-title">Niveles sugeridos (ATR)</div>
-    <div class="level-row"><span class="level-sl">Stop Loss</span><span class="level-sl">$${fmt(sl)}</span></div>
-    <div class="level-row"><span class="level-tp1">TP1 (40%)</span><span class="level-tp1">$${fmt(tp1)}</span></div>
-    <div class="level-row"><span class="level-tp2">TP2 (40%)</span><span class="level-tp2">$${fmt(tp2)}</span></div>
-    <div class="level-row"><span class="level-tp3">TP3 (20%)</span><span class="level-tp3">$${fmt(tp3)}</span></div>
-    <div class="level-rr">R/R: 1:${lvl.rr_ratio}</div>
-  </div>` : '';
-
-  const p = r.pivots || {};
-  const pivotsHtml = p.pivot != null ? (() => {
-    const price = r.price;
-    const levels = [
-      { label: 'R2', value: p.r2 },
-      { label: 'R1', value: p.r1 },
-      { label: 'Pivot', value: p.pivot },
-      { label: 'S1', value: p.s1 },
-      { label: 'S2', value: p.s2 }
-    ];
-
-    // Reclasificacion dinamica: arriba del precio = resistencia, abajo = soporte
-    // (logica clasica de AT: un soporte roto se convierte en resistencia y viceversa)
-    const above = levels
-      .filter(l => l.value > price)
-      .sort((a, b) => a.value - b.value)  // menor a mayor (mas cercana primero)
-      .slice(0, 2)                          // las 2 mas cercanas arriba
-      .sort((a, b) => b.value - a.value);   // visualmente: mayor arriba
-
-    const below = levels
-      .filter(l => l.value <= price)
-      .sort((a, b) => b.value - a.value)   // mayor a menor (mas cercana primero)
-      .slice(0, 2);                         // las 2 mas cercanas abajo
-
-    // Render: resistencias arriba (rojo), precio actual, soportes abajo (verde)
-    const renderLevel = (l, type) => {
-      const cls = type === 'r' ? 'pivot-r' : 'pivot-s';
-      const dist = ((l.value - price) / price * 100).toFixed(2);
-      const distLabel = dist > 0 ? `+${dist}%` : `${dist}%`;
-      const labelText = type === 'r' ? `Resistencia (${l.label})` : `Soporte (${l.label})`;
-      return `<div class="pivot-item">
-        <span class="${cls}">${labelText}</span>
-        <span class="${cls}">$${fmt(l.value)} <span style="font-size:0.65rem;color:#6e7681">${distLabel}</span></span>
-      </div>`;
-    };
-
-    const aboveRows = above.map(l => renderLevel(l, 'r')).join('');
-    const belowRows = below.map(l => renderLevel(l, 's')).join('');
-
-    const priceRow = `<div class="pivot-item" style="background:#1c2128;padding:5px 8px;margin:4px -10px;border-left:3px solid #58a6ff">
-      <span style="color:#58a6ff;font-weight:700">Precio actual</span>
-      <span style="color:#58a6ff;font-weight:700">$${fmt(price)}</span>
-    </div>`;
-
-    const emptyRow = (msg) => `<div class="pivot-item" style="color:#6e7681;font-size:0.7rem;font-style:italic;justify-content:center">${msg}</div>`;
-
-    return `<div class="pivots">
-      <div class="pivots-title">Soportes y Resistencias (pivots 4H)</div>
-      <div style="display:flex;flex-direction:column;gap:0">
-        ${aboveRows || emptyRow('Sin resistencias cercanas arriba')}
-        ${priceRow}
-        ${belowRows || emptyRow('Sin soportes cercanos abajo')}
+    <!-- ACCION + ESTADO (la fila que se lee de un vistazo) -->
+    <div style="display:flex;gap:10px;margin-bottom:12px">
+      <div style="flex:1;background:${actionBg};border:1px solid ${actionColor}55;border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:0.6rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">Acción</div>
+        <div style="font-size:1.3rem;font-weight:800;color:${actionColor}">${action}</div>
       </div>
-    </div>`;
-  })() : '';
-
-  const condHtml = Object.entries(r.conditions || {}).map(([k,v]) =>
-    `<div class="cond-item ${v?'pass':''}"><div class="cond-dot ${v?'dot-pass':'dot-fail'}"></div>${k}</div>`
-  ).join('');
-
-  return `<div class="card ${sc}">
-    <div class="card-header">
-      <div><div class="asset-name">${r.name}/USDT</div><div class="asset-price">$${fmt(r.price)}</div></div>
-      <div class="signal-block">
-        <span class="signal-badge ${badgeClass(r.signal)}">${r.signal || 'NEUTRAL'}</span>
-        ${r.confidence && r.confidence !== '—' ? `<span class="confidence-badge ${confClass(r.confidence)}">${r.confidence}</span>` : ''}
+      <div style="flex:1;background:#0d1117;border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:0.6rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">Precio</div>
+        <div style="font-size:1.1rem;font-weight:700;color:${estadoColor}">${flecha} ${estado}</div>
       </div>
     </div>
-    ${r.signal_reason ? `<div class="signal-reason">${r.signal_reason}</div>` : ''}
-    ${regimeHtml}
-    ${summaryHtml}
-    ${revHtml}
-    ${btcFilterHtml}
-    ${trendsHtml}
-    ${adxHtml}
-    ${fundingHtml}
-    <div class="score-section">
-      <div class="score-label"><span>Score</span><span>${r.score > 0 ? '+' : ''}${r.score} / ${r.max_score}</span></div>
-      <div class="score-bar"><div class="score-fill ${fc}" style="width:${sw}%"></div></div>
+
+    <!-- SEMAFOROS -->
+    <div style="display:flex;gap:4px;background:#0d1117;border-radius:8px;padding:10px 6px;margin-bottom:10px">
+      ${sem('Tend', semTrend)}
+      ${sem('RSI', semRsi)}
+      ${sem('ADX', semAdx)}
+      ${sem('MACD', semMacd)}
+      ${sem('Vol', semObv)}
     </div>
-    ${warningsHtml}
-    ${divHtml}
-    <div class="indicators">
-      <div class="kpi"><div class="kpi-label">RSI 6</div><div class="kpi-value">${r.rsi6 ?? '—'}</div></div>
-      <div class="kpi"><div class="kpi-label">RSI 20</div><div class="kpi-value">${r.rsi20 ?? '—'}</div></div>
-      <div class="kpi"><div class="kpi-label">MACD hist</div><div class="kpi-value" style="color:${r.macd_hist>0?'#2ea043':'#da3633'}">${r.macd_hist ?? '—'}</div></div>
-      <div class="kpi"><div class="kpi-label">EMA 20</div><div class="kpi-value">$${fmt(r.ema20)}</div></div>
-      <div class="kpi"><div class="kpi-label">VWAP</div><div class="kpi-value">$${fmt(r.vwap)}</div></div>
-      <div class="kpi"><div class="kpi-label">OBV</div><div class="kpi-value" style="color:${r.obv_trend==='ALCISTA'?'#2ea043':'#da3633'}">${r.obv_trend}</div></div>
+
+    <!-- Linea de contexto: regimen + giro + nivel -->
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="font-size:0.7rem;font-weight:700;color:${regimeColor(r.regime)}">${r.regime||'—'}</span>
+      ${giroChip}
     </div>
-    ${levelsHtml}
-    ${pivotsHtml}
-    <div class="conditions"><div class="cond-title">Condiciones</div>${condHtml}</div>
+    <div style="margin-top:6px;display:flex;justify-content:space-between;align-items:center">
+      ${nivelClave}
+      <span style="font-size:0.62rem;color:#6e7681">toca para ver detalle ▾</span>
+    </div>
+
+    <!-- PANEL DETALLE (oculto, se abre al tocar) -->
+    <div id="detail-${r.name}" class="hidden" style="margin-top:12px;padding-top:12px;border-top:1px solid #21262d" onclick="event.stopPropagation()">
+      ${r.summary ? `<div style="background:#0d1117;border-radius:6px;padding:10px;margin-bottom:10px;border-left:3px solid #388bfd">
+        <div style="font-size:0.6rem;color:#8b949e;text-transform:uppercase;margin-bottom:3px">Lectura del bot</div>
+        <div style="font-size:0.8rem;color:#adbac7;line-height:1.45">${r.summary}</div></div>` : ''}
+
+      ${rev.reversing ? `<div style="background:#2d2100;border:1px solid #bb8009;border-radius:6px;padding:9px;margin-bottom:10px">
+        <div style="font-size:0.68rem;color:#f0b429;font-weight:700;margin-bottom:3px">Posible giro → ${rev.direction||''} (${rev.reversal_score}/100)</div>
+        <div style="font-size:0.72rem;color:#adbac7;line-height:1.4">${(rev.signals||[]).map(s=>'• '+s).join('<br>')}</div></div>` : ''}
+
+      <!-- Tendencias por timeframe -->
+      <div style="display:flex;gap:6px;margin-bottom:10px">
+        <span class="trend-pill ${trendClass(r.trend_1w)}" style="flex:1;text-align:center">1W: ${r.trend_1w||'—'}</span>
+        <span class="trend-pill ${trendClass(r.trend_1d)}" style="flex:1;text-align:center">1D: ${r.trend_1d||'—'}</span>
+        <span class="trend-pill ${trendClass(r.trend_1h)}" style="flex:1;text-align:center">1H: ${r.trend_1h||'—'}</span>
+      </div>
+
+      <!-- Indicadores numericos -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">
+        <div class="kpi"><div class="kpi-label">RSI 6</div><div class="kpi-value">${r.rsi6 ?? '—'}</div></div>
+        <div class="kpi"><div class="kpi-label">RSI 20</div><div class="kpi-value">${r.rsi20 ?? '—'}</div></div>
+        <div class="kpi"><div class="kpi-label">ADX</div><div class="kpi-value">${r.adx ?? '—'}</div></div>
+        <div class="kpi"><div class="kpi-label">MACD h</div><div class="kpi-value">${r.macd_hist ?? '—'}</div></div>
+        <div class="kpi"><div class="kpi-label">Score</div><div class="kpi-value">${r.score ?? '—'}/${r.max_score ?? 17}</div></div>
+        <div class="kpi"><div class="kpi-label">Conf.</div><div class="kpi-value" style="font-size:0.8rem">${r.confidence ?? '—'}</div></div>
+      </div>
+
+      ${r.funding?.available ? `<div style="font-size:0.72rem;color:#8b949e;margin-bottom:8px">Funding: <b style="color:${r.funding.rate>0?'#3fb950':'#f85149'}">${r.funding.rate>0?'+':''}${r.funding.rate}%</b> (${r.funding.sentiment||''})</div>` : ''}
+
+      <!-- Niveles operativos -->
+      ${r.levels ? `<div style="background:#0d1117;border-radius:6px;padding:9px">
+        <div style="font-size:0.6rem;color:#8b949e;text-transform:uppercase;margin-bottom:5px">Niveles ${isLong?'LONG':isShort?'SHORT':''}</div>
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:4px;font-size:0.72rem;color:#adbac7">
+          <span>Stop: <b style="color:#f85149">$${fmt(isShort?r.levels.stop_short:r.levels.stop_long)}</b></span>
+          <span>TP1: <b style="color:#3fb950">$${fmt(isShort?r.levels.tp1_short:r.levels.tp1_long)}</b></span>
+          <span>TP2: <b style="color:#3fb950">$${fmt(isShort?r.levels.tp2_short:r.levels.tp2_long)}</b></span>
+          <span>TP3: <b style="color:#3fb950">$${fmt(isShort?r.levels.tp3_short:r.levels.tp3_long)}</b></span>
+        </div></div>` : ''}
+    </div>
   </div>`;
 }
+
+function toggleDetail(name) {
+  const el = document.getElementById('detail-' + name);
+  if (el) el.classList.toggle('hidden');
+}
+
 
 async function loadData() {
   try {
@@ -979,6 +950,59 @@ async function submitCloseOp() {
 }
 
 // ── Stats y history ──────────────────────────────────────────────────────────
+
+async function loadPaper() {
+  const res = await fetch('/api/paper');
+  const s = await res.json();
+
+  const fmtPct = v => (v==null) ? '—' : (v>0?'+':'') + v + '%';
+  const wrColor = (s.win_rate==null) ? '#8b949e' : (s.win_rate>=50 ? '#3fb950' : '#f85149');
+  const pnlColor = (s.total_pnl_net_pct>0) ? '#3fb950' : '#f85149';
+
+  document.getElementById('paper-summary').innerHTML = `
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">Operaciones cerradas</div><div class="stat-value">${s.closed_count}</div></div>
+      <div class="stat-card"><div class="stat-label">Win rate</div><div class="stat-value" style="color:${wrColor}">${s.win_rate==null?'—':s.win_rate+'%'}</div><div class="stat-sub">${s.wins}W / ${s.losses}L</div></div>
+      <div class="stat-card"><div class="stat-label">PnL neto acumulado</div><div class="stat-value" style="color:${pnlColor}">${fmtPct(s.total_pnl_net_pct)}</div><div class="stat-sub">con fees incluidas</div></div>
+      <div class="stat-card"><div class="stat-label">Abiertas ahora</div><div class="stat-value">${s.open_count}</div></div>
+    </div>
+    <div style="font-size:0.8rem;color:#8b949e;margin-top:8px">
+      Ganancia media: <b style="color:#3fb950">${fmtPct(s.avg_win_pct)}</b> ·
+      Pérdida media: <b style="color:#f85149">${fmtPct(s.avg_loss_pct)}</b> ·
+      Cierres: ${Object.entries(s.by_reason||{}).map(([k,v])=>`${k}: ${v}`).join(' · ') || '—'}
+    </div>`;
+
+  // Abiertas
+  if (!s.open_trades.length) {
+    document.getElementById('paper-open').innerHTML = '<div class="empty-state">Sin operaciones de papel abiertas. Se abren solas cuando el bot genera una señal.</div>';
+  } else {
+    document.getElementById('paper-open').innerHTML = s.open_trades.map(t => `
+      <div class="op-card">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div><b style="color:#e6edf3">${t.asset}</b> <span style="color:${t.direction==='LONG'?'#3fb950':'#f85149'};font-weight:700">${t.direction}</span>
+            <span style="font-size:0.7rem;color:#8b949e;margin-left:8px">${t.regime||''}</span></div>
+          <div style="font-size:0.75rem;color:#8b949e">entrada $${fmt(t.entry_price)}</div>
+        </div>
+        <div style="font-size:0.75rem;color:#8b949e;margin-top:6px">Stop: $${fmt(t.stop_loss)} · Objetivo: $${fmt(t.take_profit)} · Score ${t.score} · ${t.confidence}</div>
+      </div>`).join('');
+  }
+
+  // Cerradas
+  if (!s.recent_closed.length) {
+    document.getElementById('paper-closed').innerHTML = '<div class="empty-state">Todavía no se cerró ninguna operación de papel.</div>';
+  } else {
+    document.getElementById('paper-closed').innerHTML = s.recent_closed.map(t => {
+      const win = (t.pnl_pct_net||0) > 0;
+      return `<div class="op-card" style="border-left:3px solid ${win?'#3fb950':'#f85149'}">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div><b style="color:#e6edf3">${t.asset}</b> <span style="color:${t.direction==='LONG'?'#3fb950':'#f85149'}">${t.direction}</span></div>
+          <div style="font-weight:700;color:${win?'#3fb950':'#f85149'}">${(t.pnl_pct_net>0?'+':'')}${t.pnl_pct_net}%</div>
+        </div>
+        <div style="font-size:0.72rem;color:#8b949e;margin-top:4px">$${fmt(t.entry_price)} → $${fmt(t.exit_price)} · cierre: ${t.exit_reason}</div>
+      </div>`;
+    }).join('');
+  }
+}
 
 async function loadStats() {
   const el = document.getElementById('stats-grid');
