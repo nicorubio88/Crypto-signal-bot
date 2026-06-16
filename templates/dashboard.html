@@ -464,6 +464,19 @@ function renderCard(r) {
       <div style="font-size:0.6rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.3px">${label}</div>
     </div>`;
 
+  // ── Setup de corto plazo (timing 1H dentro del contexto grande) ──
+  const st = r.short_setup || {};
+  let setupChip = '';
+  if (st.setup === 'REBOTE') {
+    setupChip = `<div style="background:rgba(210,153,34,0.12);border:1px solid #d2992288;border-radius:6px;padding:7px 9px;margin-top:8px">
+      <div style="font-size:0.66rem;color:#d2992f;font-weight:700">⤴ REBOTE 1H${st.en_zona?' · en '+st.zona_tipo:''}</div>
+      <div style="font-size:0.68rem;color:#adbac7;margin-top:2px;line-height:1.35">${st.detail||''}</div></div>`;
+  } else if (st.setup === 'CONTINUACION') {
+    setupChip = `<div style="background:rgba(56,139,253,0.10);border:1px solid #388bfd66;border-radius:6px;padding:7px 9px;margin-top:8px">
+      <div style="font-size:0.66rem;color:#58a6ff;font-weight:700">→ CONTINUACIÓN 1H</div>
+      <div style="font-size:0.68rem;color:#adbac7;margin-top:2px;line-height:1.35">${st.detail||''}</div></div>`;
+  }
+
   // ── Alerta de giro (solo si esta activa) ──
   const rev = r.reversal || {};
   const giroChip = rev.reversing
@@ -502,6 +515,7 @@ function renderCard(r) {
       ${sem('MACD', semMacd)}
       ${sem('Vol', semObv)}
     </div>
+    ${setupChip}
 
     <!-- Linea de contexto: regimen + giro + nivel -->
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
