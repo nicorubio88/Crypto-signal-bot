@@ -722,29 +722,21 @@ def get_signal(score: float, trend_1h: str, trend_1d: str, trend_1w: str,
                 "confidence": "—",
                 "threshold_used": threshold}
 
-    # Filtro 2: tendencia 1W
-    if raw == "LONG" and trend_1w == "BAJISTA":
+    # Filtros 2+3: tendencia mayor (1W y 1D combinados)
+    # FIX (jul-2026): antes cualquiera de los dos en contra anulaba la señal.
+    # Eso bloqueo TODOS los LONG durante el rebote (el 1W tarda semanas en girar)
+    # y produjo 27 señales SHORT / 0 LONG con 26% de acierto. Ahora solo se anula
+    # si AMBOS marcos van en contra; si uno solo se opone, la señal pasa con
+    # confianza reducida (el filtro se vuelve gradual, no binario).
+    opposite = "BAJISTA" if raw == "LONG" else "ALCISTA"
+    w_against = trend_1w == opposite
+    d_against = trend_1d == opposite
+    if w_against and d_against:
         return {"signal": "NEUTRAL",
-                "reason": "Contra tendencia semanal (BAJISTA)",
+                "reason": f"Contra tendencia semanal Y diaria ({opposite})",
                 "confidence": "—",
                 "threshold_used": threshold}
-    if raw == "SHORT" and trend_1w == "ALCISTA":
-        return {"signal": "NEUTRAL",
-                "reason": "Contra tendencia semanal (ALCISTA)",
-                "confidence": "—",
-                "threshold_used": threshold}
-
-    # Filtro 3: tendencia 1D
-    if raw == "LONG" and trend_1d == "BAJISTA":
-        return {"signal": "NEUTRAL",
-                "reason": "Contra tendencia diaria",
-                "confidence": "—",
-                "threshold_used": threshold}
-    if raw == "SHORT" and trend_1d == "ALCISTA":
-        return {"signal": "NEUTRAL",
-                "reason": "Contra tendencia diaria",
-                "confidence": "—",
-                "threshold_used": threshold}
+    counter_trend = w_against or d_against  # un marco en contra: permitir con cautela
 
     # Filtro 4: confirmacion 1H
     target = "ALCISTA" if raw == "LONG" else "BAJISTA"
@@ -755,13 +747,16 @@ def get_signal(score: float, trend_1h: str, trend_1d: str, trend_1w: str,
     aligned_1d_1w = (trend_1d == trend_1w) and trend_1d in ("ALCISTA", "BAJISTA")
 
     # Score excepcional (1.3× umbral) + alineacion + confirmacion = ALTA
-    if abs_score >= threshold * 1.3 and aligned_1d_1w and confirms_1h:
+    if abs_score >= threshold * 1.3 and aligned_1d_1w and confirms_1h and not counter_trend:
         confidence = "ALTA"
-    elif abs_score >= threshold and confirms_1h:
+    elif abs_score >= threshold and confirms_1h and not counter_trend:
         confidence = "MEDIA"
     else:
         confidence = "BAJA"
-        reasons.append("1H no confirma — esperar timing")
+        if counter_trend:
+            reasons.append("Un marco mayor en contra — señal temprana de giro, tamaño reducido")
+        if not confirms_1h:
+            reasons.append("1H no confirma — esperar timing")
 
     return {"signal": raw,
             "reason": " | ".join(reasons) if reasons else "",

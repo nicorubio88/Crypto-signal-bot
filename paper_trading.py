@@ -21,10 +21,15 @@ FEE_PCT = 0.05
 
 # ── Reglas de salida (gatillos) ───────────────────────────────────────────────
 # Basado en los datos: la ventana buena es ~24H, el 72H se desploma.
-# El objetivo es cerrar ANTES de la zona donde la señal historicamente envejece mal.
 MAX_HOURS_OPEN     = 48     # gatillo 2: limite de tiempo (freno duro)
-TRAILING_GIVEBACK  = 0.40   # gatillo 3: si devuelve 40% de la ganancia maxima, cerrar
-MIN_PROFIT_TO_TRAIL = 1.0   # solo activa trailing si la ganancia maxima supero 1%
+# TRAILING DESACTIVADO (jul-2026): los datos del paper trading mostraron que
+# cortaba las ganadoras en +0.9% promedio (ninguna llego a TP) mientras las
+# perdedoras iban al stop completo (-3.3%) => PnL total negativo pese a 67% de
+# acierto. El backtest sin trailing dio +3.44% con TPs de +2.5/+4.8%.
+# Se reactivara solo si nuevos datos lo justifican, con umbrales recalibrados.
+TRAILING_ENABLED   = False
+TRAILING_GIVEBACK  = 0.40   # (sin efecto mientras TRAILING_ENABLED=False)
+MIN_PROFIT_TO_TRAIL = 1.0   # (sin efecto mientras TRAILING_ENABLED=False)
 
 
 def get_conn():
@@ -225,11 +230,11 @@ def update_paper_trades(asset: str, current_price: float, current_signal: str = 
             max_profit = (entry - best) / entry * 100
             cur_profit = (entry - current_price) / entry * 100
 
-        # Guardar el mejor precio actualizado
+        # Guardar el mejor precio actualizado (se sigue trackeando para analisis)
         conn.execute("UPDATE paper_trades SET best_price=? WHERE id=?", (best, t["id"]))
 
-        # Si la ganancia maxima supero el minimo y devolvio TRAILING_GIVEBACK de ella
-        if max_profit >= MIN_PROFIT_TO_TRAIL:
+        # Trailing solo si esta habilitado (desactivado por evidencia, ver arriba)
+        if TRAILING_ENABLED and max_profit >= MIN_PROFIT_TO_TRAIL:
             giveback = (max_profit - cur_profit) / max_profit if max_profit > 0 else 0
             if giveback >= TRAILING_GIVEBACK:
                 _close(conn, t, current_price, "trailing")
