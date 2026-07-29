@@ -15,6 +15,7 @@ StochRSI, MACD, ADX + DI, OBV, VWAP diario, ATR, divergencias RSI, pivots.
 import time
 import requests
 import pandas as pd
+import numpy as np
 import pandas_ta as ta
 from datetime import datetime
 
@@ -695,6 +696,216 @@ def get_adaptive_threshold(adx: float) -> int:
 
 # ── Señal final (incluye confirmacion 1H y filtros multi-timeframe) ──────────
 
+def calculate_poc(df: pd.DataFrame, lookback: int = 100, bins: int = 24) -> dict:
+    """
+    Volume Profile simplificado: encuentra el POC (Point of Control) — el
+    precio donde se concentro mas volumen negociado en el periodo. A diferencia
+    de Fibonacci, tiene fundamento real: refleja donde esta comprometido el
+    capital, no una relacion geometrica. Sirve como zona de reaccion/iman.
+
+    Metodo: divide el rango de precios del periodo en 'bins' bandas, suma el
+    volumen de cada vela en la banda que contiene su precio de cierre, y
+    devuelve la banda con mas volumen (POC) + el rango de valores (VAH/VAL
+    aproximado como las bandas que contienen el 70% del volumen alrededor del POC).
+    """
+    d = df.tail(lookback)
+    if len(d) < 10:
+        return {}
+
+    lo, hi = d["low"].min(), d["high"].max()
+    if hi <= lo:
+        return {}
+
+    edges = np.linspace(lo, hi, bins + 1)
+    vol_by_bin = np.zeros(bins)
+    for _, row in d.iterrows():
+        idx = np.searchsorted(edges, row["close"], side="right") - 1
+        idx = min(max(idx, 0), bins - 1)
+        vol_by_bin[idx] += row["volume"]
+
+    poc_idx = int(np.argmax(vol_by_bin))
+    poc_price = (edges[poc_idx] + edges[poc_idx + 1]) / 2
+
+    # Value area aproximada: expandir desde el POC hasta cubrir ~70% del volumen
+    total_vol = vol_by_bin.sum()
+    if total_vol <= 0:
+        return {"poc": round(poc_price, 4)}
+    covered = vol_by_bin[poc_idx]
+    lo_i, hi_i = poc_idx, poc_idx
+    while covered / total_vol < 0.70 and (lo_i > 0 or hi_i < bins - 1):
+        left = vol_by_bin[lo_i - 1] if lo_i > 0 else -1
+        right = vol_by_bin[hi_i + 1] if hi_i < bins - 1 else -1
+        if left >= right:
+            lo_i -= 1; covered += max(left, 0)
+        else:
+            hi_i += 1; covered += max(right, 0)
+
+    return {
+        "poc": round(poc_price, 4),
+        "vah": round(edges[hi_i + 1], 4),  # value area high
+        "val": round(edges[lo_i], 4),      # value area low
+    }
+
+
+def calculate_fibonacci(df: pd.DataFrame, lookback: int = 100) -> dict:
+    """
+    Retroceso y extension de Fibonacci sobre el ultimo swing (maximo/minimo)
+    del periodo. NOTA DE HONESTIDAD: Fibonacci tiene evidencia empirica debil
+    como generador de señales — funciona mas por profecia autocumplida (mucha
+    gente lo mira) que por logica de mercado. Se usa aca como REFERENCIA DE
+    NIVELES, con peso modesto en el score v2, no como señal fuerte por si sola.
+    """
+    d = df.tail(lookback)
+    if len(d) < 10:
+        return {}
+
+    hi_idx = d["high"].idxmax()
+    lo_idx = d["low"].idxmin()
+    hi_price = d.loc[hi_idx, "high"]
+    lo_price = d.loc[lo_idx, "low"]
+    if hi_price <= lo_price:
+        return {}
+
+    # Direccion del swing: si el minimo es mas reciente que el maximo, el
+    # movimiento dominante fue bajista (retrocedemos una caida, swing down);
+    # si el maximo es mas reciente, fue alcista (retrocedemos una subida).
+    swing_down = lo_idx > hi_idx  # el minimo ocurrio despues -> caida reciente
+    diff = hi_price - lo_price
+
+    if swing_down:
+        # Retrocesos hacia arriba desde el minimo (posible rebote)
+        levels = {f"{r}": round(lo_price + diff * r, 4) for r in [0.382, 0.5, 0.618, 0.786]}
+        extensions = {f"{r}": round(lo_price - diff * (r - 1), 4) for r in [1.272, 1.618]}
+        direction = "retroceso_alcista"
+    else:
+        # Retrocesos hacia abajo desde el maximo (posible corrección)
+        levels = {f"{r}": round(hi_price - diff * r, 4) for r in [0.382, 0.5, 0.618, 0.786]}
+        extensions = {f"{r}": round(hi_price + diff * (r - 1), 4) for r in [1.272, 1.618]}
+        direction = "retroceso_bajista"
+
+    return {
+        "direction": direction,
+        "swing_high": round(hi_price, 4),
+        "swing_low": round(lo_price, 4),
+        "retracement": levels,
+        "extension": extensions,
+    }
+
+
+MAX_SCORE_V2 = 12
+THRESHOLD_V2 = 5
+
+
+def calculate_score_v2(df_1h: pd.DataFrame, df_4h: pd.DataFrame, trend_1d: str) -> dict:
+    """
+    Score v2 — replica el metodo descripto por Agustin (Joven Inversor) en su
+    video de estrategia 2026. Cuatro componentes, en el orden que el describe:
+
+      1. RSI en 1H (sobrecompra/sobreventa 70/30) — su indicador mas usado
+      2. Divergencia RSI en 1H — la señal de agotamiento que el mas valora
+      3. POC (volumen por precio) — confluencia con la tendencia dominante
+      4. Fibonacci (retroceso) — nivel de referencia, peso modesto por evidencia debil
+      5. VWAP en 1H — gatillo de ruptura (breakout) para el timing de entrada
+
+    Max score 12. Es deliberadamente mas simple que el score v1 (17 indicadores)
+    porque el metodo original es asi: pocas herramientas, lectura de contexto.
+    """
+    conditions = {}
+    score = 0.0
+
+    if len(df_1h) < 30 or len(df_4h) < 30:
+        return {"score": 0, "max_score": MAX_SCORE_V2, "conditions": {},
+                "adx": 0, "poc": {}, "fib": {}}
+
+    row_1h = df_1h.iloc[-2]
+    current_price = row_1h["close"]
+
+    # ── 1. RSI 1H sobrecompra/sobreventa ──
+    rsi_1h = row_1h.get("RSI14")
+    if pd.notna(rsi_1h):
+        if rsi_1h < 30:
+            score += 3; conditions["RSI(1H) en sobreventa (<30)"] = True
+        elif rsi_1h > 70:
+            score -= 3; conditions["RSI(1H) en sobrecompra (>70)"] = True
+
+    # ── 2. Divergencia RSI en 1H ──
+    div_1h = detect_rsi_divergence(df_1h)
+    if div_1h.get("bullish"):
+        score += 3; conditions["Divergencia RSI(1H) alcista"] = True
+    elif div_1h.get("bearish"):
+        score -= 3; conditions["Divergencia RSI(1H) bajista"] = True
+
+    # ── 3. POC: confluencia con tendencia dominante ──
+    poc = calculate_poc(df_4h, lookback=100, bins=24)
+    if poc.get("poc") and current_price:
+        near_poc = abs(current_price - poc["poc"]) / current_price < 0.01
+        if near_poc:
+            if trend_1d == "ALCISTA":
+                score += 2; conditions["Precio en zona de POC, tendencia 1D alcista"] = True
+            elif trend_1d == "BAJISTA":
+                score -= 2; conditions["Precio en zona de POC, tendencia 1D bajista"] = True
+
+    # ── 4. Fibonacci: confluencia de nivel (peso modesto, evidencia debil) ──
+    fib = calculate_fibonacci(df_4h, lookback=100)
+    if fib.get("retracement") and current_price:
+        r618 = fib["retracement"].get("0.618")
+        r786 = fib["retracement"].get("0.786")
+        if r618 and r786:
+            lo_r, hi_r = min(r618, r786), max(r618, r786)
+            in_zone = lo_r <= current_price <= hi_r
+            if in_zone:
+                if fib["direction"] == "retroceso_alcista":
+                    score += 2; conditions["Precio en zona Fibonacci 0.618-0.786 (rebote esperado)"] = True
+                else:
+                    score -= 2; conditions["Precio en zona Fibonacci 0.618-0.786 (correccion esperada)"] = True
+
+    # ── 5. VWAP 1H: gatillo de ruptura ──
+    vwap_now = row_1h.get("VWAP")
+    vwap_prev = df_1h.iloc[-3].get("VWAP") if len(df_1h) >= 3 else None
+    price_prev = df_1h.iloc[-3].get("close") if len(df_1h) >= 3 else None
+    if pd.notna(vwap_now) and pd.notna(vwap_prev) and pd.notna(price_prev):
+        crossed_up = price_prev <= vwap_prev and current_price > vwap_now
+        crossed_down = price_prev >= vwap_prev and current_price < vwap_now
+        if crossed_up:
+            score += 2; conditions["Ruptura de VWAP(1H) al alza"] = True
+        elif crossed_down:
+            score -= 2; conditions["Ruptura de VWAP(1H) a la baja"] = True
+
+    adx_4h = df_4h.iloc[-2].get("ADX")
+    return {
+        "score": round(score, 1),
+        "max_score": MAX_SCORE_V2,
+        "conditions": conditions,
+        "adx": round(adx_4h, 1) if pd.notna(adx_4h) else 0,
+        "poc": poc,
+        "fib": fib,
+    }
+
+
+def get_signal_v2(score: float, trend_1d: str, adx: float) -> dict:
+    """
+    Señal v2: umbral fijo (a diferencia del adaptativo de v1, para mantener
+    la simplicidad del metodo original). Si la señal va contra la tendencia
+    1D, no se bloquea del todo (igual que el fix de v1) pero queda BAJA.
+    """
+    if abs(score) < THRESHOLD_V2:
+        return {"signal": "NEUTRAL", "confidence": "—",
+                "reason": f"Score insuficiente ({score}, umbral {THRESHOLD_V2})"}
+
+    raw = "LONG" if score > 0 else "SHORT"
+    aligned = (raw == "LONG" and trend_1d == "ALCISTA") or \
+              (raw == "SHORT" and trend_1d == "BAJISTA")
+
+    if abs(score) >= 8 and aligned:
+        confidence = "ALTA"
+    elif aligned:
+        confidence = "MEDIA"
+    else:
+        confidence = "BAJA"
+
+    return {"signal": raw, "confidence": confidence, "reason": ""}
+
+
 def get_signal(score: float, trend_1h: str, trend_1d: str, trend_1w: str,
                market_trending: bool, adx: float = 0) -> dict:
     """
@@ -1145,6 +1356,20 @@ def analyze(name: str, symbol: str, main_tf: str = "4h") -> dict:
         reversal = detect_trend_reversal(df_main, regime_data["regime"])
         short_setup = detect_short_term_setup(df_1h, trend_1d, trend_1w, pivots, df_main.iloc[-2]["close"])
 
+        # ── V2: metodo alternativo (Agustin/Joven Inversor) — corre EN PARALELO ──
+        # No afecta score/signal/regimen de v1. Solo para comparar acertividad.
+        score_v2_data = calculate_score_v2(df_1h, df_4h, trend_1d)
+        signal_v2_data = get_signal_v2(score_v2_data["score"], trend_1d, score_v2_data["adx"])
+        v2 = {
+            "score": score_v2_data["score"],
+            "max_score": score_v2_data["max_score"],
+            "conditions": score_v2_data["conditions"],
+            "signal": signal_v2_data["signal"],
+            "confidence": signal_v2_data["confidence"],
+            "poc": score_v2_data["poc"],
+            "fib": score_v2_data["fib"],
+        }
+
         target_for_signal = "ALCISTA" if "LONG" in signal_data["signal"] else "BAJISTA" if "SHORT" in signal_data["signal"] else None
         confirm_1h = (trend_1h == target_for_signal) if target_for_signal else False
 
@@ -1198,6 +1423,7 @@ def analyze(name: str, symbol: str, main_tf: str = "4h") -> dict:
             "close_short": close_short,
             "reversal":    reversal,
             "short_setup": short_setup,
+            "v2":          v2,
             "updated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
             "error": None,
         }

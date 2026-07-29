@@ -32,6 +32,7 @@ state = {
     "last_regimes": {},  # tracking de regimen anterior por activo (cambio de regimen)
     "last_reversal": {},  # tracking de alerta de giro ya enviada por activo
     "last_setup": {},  # tracking de setup de corto plazo por activo
+    "last_signals_v2": {},  # tracking de señal v2 por activo (metodo Agustin)
     "operation_alerts_sent": {},  # tracking de alertas ya enviadas por operacion
 }
 
@@ -118,8 +119,8 @@ def refresh_data():
     for r in clean:
         if r.get("error"): continue
         update_outcomes(r["name"], r["price"])
-        # Paper trading: actualizar abiertos (chequea SL/TP/inversion) y abrir nuevos
-        paper.update_paper_trades(r["name"], r["price"], r.get("signal"), r.get("reversal"))
+        # Paper trading v1 (sistema actual): actualizar abiertos y abrir nuevos
+        paper.update_paper_trades(r["name"], r["price"], r.get("signal"), r.get("reversal"), version="v1")
         name = r["name"]
         signal = r["signal"]
         prev = state["last_signals"].get(name, "")
@@ -127,10 +128,24 @@ def refresh_data():
         changed = signal != prev
         if is_actionable and changed:
             save_signal(r)
-            paper.open_paper_trade(r)  # abrir operacion ficticia siguiendo la señal
+            paper.open_paper_trade(r, version="v1")  # abrir operacion ficticia siguiendo la señal
             send_message(format_signal_message(r))
             print(f"  Nueva señal: {name} -> {signal}")
             state["last_signals"][name] = signal
+
+        # ── Paper trading v2 (metodo Agustin): corre EN PARALELO, mismo mercado ──
+        # Usa los mismos niveles SL/TP (misma gestion de riesgo) para aislar
+        # la comparacion a la logica de señal de entrada.
+        v2 = r.get("v2", {})
+        v2_signal = v2.get("signal", "NEUTRAL")
+        paper.update_paper_trades(name, r["price"], v2_signal, r.get("reversal"), version="v2")
+        prev_v2 = state["last_signals_v2"].get(name, "")
+        if ("LONG" in v2_signal or "SHORT" in v2_signal) and v2_signal != prev_v2:
+            v2_result = {**r, "signal": v2_signal, "score": v2.get("score"),
+                        "confidence": v2.get("confidence")}
+            paper.open_paper_trade(v2_result, version="v2")
+            print(f"  Nueva señal v2: {name} -> {v2_signal}")
+        state["last_signals_v2"][name] = v2_signal
 
         # ── Alerta general de cambio de regimen (con o sin posicion abierta) ──
         regime = r.get("regime", "")
@@ -189,18 +204,15 @@ def refresh_data():
 
 
 def check_paper_realtime():
-    """Chequeo rapido de SL/TP de paper trades, corre siempre (haya o no ops manuales)."""
-    open_paper = paper.get_paper_stats()["open_trades"]
-    if not open_paper:
+    """Chequeo rapido de SL/TP de paper trades (v1 y v2), corre siempre."""
+    open_v1 = paper.get_paper_stats("v1")["open_trades"]
+    open_v2 = paper.get_paper_stats("v2")["open_trades"]
+    if not open_v1 and not open_v2:
         return
     try:
         from engine import SYMBOLS, fetch_candles
-        seen = set()
-        for t in open_paper:
-            asset = t["asset"]
-            if asset in seen:
-                continue
-            seen.add(asset)
+        assets = {t["asset"] for t in open_v1} | {t["asset"] for t in open_v2}
+        for asset in assets:
             symbol = SYMBOLS.get(asset)
             if not symbol:
                 continue
@@ -208,7 +220,11 @@ def check_paper_realtime():
                 df = fetch_candles(symbol, "1h", limit=2)
                 last_price = float(df.iloc[-1]["close"])
                 cached = next((r for r in state["results"] if r.get("name") == asset), {})
-                paper.update_paper_trades(asset, last_price, cached.get("signal"), cached.get("reversal"))
+                paper.update_paper_trades(asset, last_price, cached.get("signal"),
+                                          cached.get("reversal"), version="v1")
+                v2 = cached.get("v2", {})
+                paper.update_paper_trades(asset, last_price, v2.get("signal"),
+                                          cached.get("reversal"), version="v2")
             except Exception as e:
                 print(f"  Error paper check {asset}: {e}")
     except Exception as e:
@@ -332,8 +348,18 @@ def api_backtest(asset):
 
 @app.route("/api/paper")
 def api_paper():
-    """Estadisticas del paper trading automatico (validacion sin riesgo)."""
-    return Response(json.dumps(sanitize(paper.get_paper_stats()), indent=2),
+    """Estadisticas del paper trading automatico (validacion sin riesgo). ?version=v1|v2"""
+    version = request.args.get("version", "v1")
+    if version not in ("v1", "v2"):
+        version = "v1"
+    return Response(json.dumps(sanitize(paper.get_paper_stats(version)), indent=2),
+                    mimetype="application/json")
+
+
+@app.route("/api/paper/compare")
+def api_paper_compare():
+    """Compara v1 (sistema actual) vs v2 (metodo Agustin/Joven Inversor)."""
+    return Response(json.dumps(sanitize(paper.get_paper_stats_compare()), indent=2),
                     mimetype="application/json")
 
 

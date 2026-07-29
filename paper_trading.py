@@ -65,34 +65,42 @@ def init_db():
 
             opened_at    TEXT NOT NULL,
             closed_at    TEXT,
-            best_price   REAL
+            best_price   REAL,
+            version      TEXT NOT NULL DEFAULT 'v1'
         );
         CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
         CREATE INDEX IF NOT EXISTS idx_paper_asset  ON paper_trades(asset);
+        CREATE INDEX IF NOT EXISTS idx_paper_version ON paper_trades(version);
     """)
     # Migracion idempotente: best_price para trailing (gatillo 3)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(paper_trades)")]
     if "best_price" not in cols:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN best_price REAL")
+    # Migracion idempotente: version, para correr v1 y v2 en paralelo y comparar.
+    # Filas existentes (todo lo previo a esto) se marcan 'v1' por default.
+    if "version" not in cols:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN version TEXT NOT NULL DEFAULT 'v1'")
     conn.commit()
     conn.close()
 
 
-def has_open_paper(asset: str) -> bool:
+def has_open_paper(asset: str, version: str = "v1") -> bool:
     conn = get_conn()
     r = conn.execute(
-        "SELECT COUNT(*) n FROM paper_trades WHERE asset=? AND status='OPEN'",
-        (asset,)
+        "SELECT COUNT(*) n FROM paper_trades WHERE asset=? AND status='OPEN' AND version=?",
+        (asset, version)
     ).fetchone()
     conn.close()
     return r["n"] > 0
 
 
-def open_paper_trade(result: dict) -> dict:
+def open_paper_trade(result: dict, version: str = "v1") -> dict:
     """
     Abre una operacion de papel a partir de una señal del bot.
     Usa los niveles de SL/TP del propio analisis (TP1 como objetivo).
-    Una sola posicion de papel abierta por activo a la vez.
+    Una sola posicion de papel abierta por activo Y VERSION a la vez
+    (v1 y v2 pueden tener posiciones simultaneas del mismo activo, para
+    poder compararlas corriendo en paralelo sobre el mismo mercado).
     """
     signal = result.get("signal", "")
     direction = "LONG" if "LONG" in signal else "SHORT" if "SHORT" in signal else None
@@ -100,7 +108,7 @@ def open_paper_trade(result: dict) -> dict:
         return {"ok": False, "error": "señal no operable"}
 
     asset = result["name"]
-    if has_open_paper(asset):
+    if has_open_paper(asset, version):
         return {"ok": False, "error": "ya hay paper abierto"}
 
     entry = result["price"]
@@ -116,18 +124,18 @@ def open_paper_trade(result: dict) -> dict:
     conn.execute("""
         INSERT INTO paper_trades
             (asset, direction, entry_price, stop_loss, take_profit,
-             score, confidence, regime, adx, opened_at, best_price)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+             score, confidence, regime, adx, opened_at, best_price, version)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         asset, direction, entry, sl, tp,
         result.get("score"), result.get("confidence", ""),
         result.get("regime", ""), result.get("adx"),
-        datetime.utcnow().isoformat(), entry,
+        datetime.utcnow().isoformat(), entry, version,
     ))
     conn.commit()
     conn.close()
     return {"ok": True, "asset": asset, "direction": direction,
-            "entry": entry, "sl": sl, "tp": tp}
+            "entry": entry, "sl": sl, "tp": tp, "version": version}
 
 
 def _close(conn, trade, exit_price, reason):
@@ -150,24 +158,24 @@ def _close(conn, trade, exit_price, reason):
 
 
 def update_paper_trades(asset: str, current_price: float, current_signal: str = None,
-                        reversal: dict = None):
+                        reversal: dict = None, version: str = "v1"):
     """
-    Para los paper abiertos del activo, chequea las condiciones de cierre.
+    Para los paper abiertos del activo Y VERSION, chequea las condiciones de cierre.
 
     Orden de prioridad de cierre:
       1. Stop loss / Take profit (niveles fijos)
       2. Señal invertida (el bot cambio de opinion)
       3. GATILLO GIRO: detector de reversion en contra de la posicion
       4. GATILLO TIEMPO: la señal lleva mas de MAX_HOURS_OPEN abierta
-      5. GATILLO TRAILING: devolvio mucho de la ganancia maxima
+      5. GATILLO TRAILING: devolvio mucho de la ganancia maxima (desactivado)
 
     Los gatillos 3-5 atacan el problema medido: las señales envejecen mal
     pasadas ~24-48h. Se busca cerrar antes de la zona donde se desploma el 72H.
     """
     conn = get_conn()
     open_trades = conn.execute(
-        "SELECT * FROM paper_trades WHERE asset=? AND status='OPEN'",
-        (asset,)
+        "SELECT * FROM paper_trades WHERE asset=? AND status='OPEN' AND version=?",
+        (asset, version)
     ).fetchall()
 
     now = datetime.utcnow()
@@ -244,15 +252,17 @@ def update_paper_trades(asset: str, current_price: float, current_signal: str = 
     conn.close()
 
 
-def get_paper_stats() -> dict:
-    """Estadisticas de las operaciones de papel cerradas + abiertas actuales."""
+def get_paper_stats(version: str = "v1") -> dict:
+    """Estadisticas de las operaciones de papel cerradas + abiertas, por version."""
     conn = get_conn()
 
     closed = conn.execute(
-        "SELECT * FROM paper_trades WHERE status='CLOSED' ORDER BY closed_at DESC"
+        "SELECT * FROM paper_trades WHERE status='CLOSED' AND version=? ORDER BY closed_at DESC",
+        (version,)
     ).fetchall()
     open_now = conn.execute(
-        "SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY opened_at DESC"
+        "SELECT * FROM paper_trades WHERE status='OPEN' AND version=? ORDER BY opened_at DESC",
+        (version,)
     ).fetchall()
 
     n = len(closed)
@@ -267,7 +277,9 @@ def get_paper_stats() -> dict:
         r = t["exit_reason"] or "?"
         reasons[r] = reasons.get(r, 0) + 1
 
+    conn.close()
     return {
+        "version": version,
         "closed_count": n,
         "open_count": len(open_now),
         "win_rate": round(wins / n * 100, 1) if n else None,
@@ -280,6 +292,25 @@ def get_paper_stats() -> dict:
         "open_trades": [dict(t) for t in open_now],
         "recent_closed": [dict(t) for t in closed[:15]],
         "note": "Operativa simulada con SL/TP y fees. Mide el bot operando en vivo, sin riesgo.",
+    }
+
+
+def get_paper_stats_compare() -> dict:
+    """
+    Compara v1 (sistema actual, 17 indicadores) vs v2 (metodo Agustin/Joven
+    Inversor: RSI-1H + divergencia + POC + Fibonacci + VWAP-1H breakout).
+    Mismos stops/objetivos en ambas (misma gestion de riesgo) — la unica
+    variable que cambia es la logica de generacion de la señal de entrada.
+    """
+    v1 = get_paper_stats("v1")
+    v2 = get_paper_stats("v2")
+    return {
+        "v1": v1,
+        "v2": v2,
+        "note": "v1 = sistema actual (17 indicadores). v2 = metodo Agustin "
+                "(RSI-1H + divergencia + POC + Fibonacci + VWAP-1H). "
+                "Mismos stops/objetivos en las dos — se compara solo la señal de entrada. "
+                "Con pocas operaciones cerradas la comparacion no es concluyente todavia.",
     }
 
 
