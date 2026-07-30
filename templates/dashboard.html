@@ -461,6 +461,14 @@ function renderCard(r) {
   else if (isShort){ action = 'SHORT';   actionColor = '#f85149'; actionBg = 'rgba(248,81,73,0.12)'; }
   else             { action = 'ESPERAR'; actionColor = '#8b949e'; actionBg = 'rgba(139,148,158,0.10)'; }
 
+  // ── Recomendacion v2 (metodo Agustin), para comparar contra v1 en vivo ──
+  const v2 = r.v2 || {};
+  let v2Action, v2Color;
+  if (v2.signal?.includes('LONG'))       { v2Action = 'LONG';    v2Color = '#3fb950'; }
+  else if (v2.signal?.includes('SHORT')) { v2Action = 'SHORT';   v2Color = '#f85149'; }
+  else                                    { v2Action = 'ESPERAR'; v2Color = '#8b949e'; }
+  const coincide = action === v2Action;
+
   // ── ESTADO del precio: combina las 3 tendencias en una direccion clara ──
   const trends = [r.trend_1w, r.trend_1d, r.trend_1h];
   const ups = trends.filter(t => t === 'ALCISTA').length;
@@ -531,6 +539,14 @@ function renderCard(r) {
       </div>
     </div>
 
+    <!-- COMPARACION v1 vs v2: que recomienda cada metodo -->
+    <div style="display:flex;gap:6px;align-items:center;background:#0d1117;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:0.72rem">
+      <span style="color:#8b949e">v1:</span> <b style="color:${actionColor}">${action}</b>
+      <span style="color:#30363d;margin:0 2px">|</span>
+      <span style="color:#8b949e">v2:</span> <b style="color:${v2Color}">${v2Action}</b>
+      <span style="margin-left:auto;font-size:0.62rem;color:${coincide?'#3fb950':'#d29922'}">${coincide?'✓ coinciden':'⚠ difieren'}</span>
+    </div>
+
     <!-- SEMAFOROS -->
     <div style="display:flex;gap:4px;background:#0d1117;border-radius:8px;padding:10px 6px;margin-bottom:10px">
       ${sem('Tend', semTrend)}
@@ -581,7 +597,7 @@ function renderCard(r) {
       ${r.funding?.available ? `<div style="font-size:0.72rem;color:#8b949e;margin-bottom:8px">Funding: <b style="color:${r.funding.rate>0?'#3fb950':'#f85149'}">${r.funding.rate>0?'+':''}${r.funding.rate}%</b> (${r.funding.sentiment||''})</div>` : ''}
 
       <!-- Niveles operativos -->
-      ${r.levels ? `<div style="background:#0d1117;border-radius:6px;padding:9px">
+      ${r.levels ? `<div style="background:#0d1117;border-radius:6px;padding:9px;margin-bottom:10px">
         <div style="font-size:0.6rem;color:#8b949e;text-transform:uppercase;margin-bottom:5px">Niveles ${isLong?'LONG':isShort?'SHORT':''}</div>
         <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:4px;font-size:0.72rem;color:#adbac7">
           <span>Stop: <b style="color:#f85149">$${fmt(isShort?r.levels.stop_short:r.levels.stop_long)}</b></span>
@@ -589,6 +605,17 @@ function renderCard(r) {
           <span>TP2: <b style="color:#3fb950">$${fmt(isShort?r.levels.tp2_short:r.levels.tp2_long)}</b></span>
           <span>TP3: <b style="color:#3fb950">$${fmt(isShort?r.levels.tp3_short:r.levels.tp3_long)}</b></span>
         </div></div>` : ''}
+
+      <!-- V2: detalle del metodo Agustin (RSI-1H + POC + Fib + VWAP-1H) -->
+      <div style="background:#0d1117;border-radius:6px;padding:9px;border-left:3px solid #d29922">
+        <div style="font-size:0.6rem;color:#d29922;text-transform:uppercase;margin-bottom:5px">v2 — método Agustín</div>
+        <div style="font-size:0.75rem;color:#adbac7;margin-bottom:6px">
+          Score: <b>${v2.score ?? '—'}/${v2.max_score ?? 12}</b> · Confianza: <b>${v2.confidence ?? '—'}</b>
+        </div>
+        ${v2.poc?.poc ? `<div style="font-size:0.7rem;color:#8b949e">POC: $${fmt(v2.poc.poc)} (VAL $${fmt(v2.poc.val)} – VAH $${fmt(v2.poc.vah)})</div>` : ''}
+        ${v2.fib?.retracement ? `<div style="font-size:0.7rem;color:#8b949e;margin-top:2px">Fib 0.618: $${fmt(v2.fib.retracement['0.618'])} · 0.786: $${fmt(v2.fib.retracement['0.786'])}</div>` : ''}
+        ${Object.keys(v2.conditions||{}).length ? `<div style="font-size:0.68rem;color:#8b949e;margin-top:6px">${Object.keys(v2.conditions).map(c=>'• '+c).join('<br>')}</div>` : ''}
+      </div>
     </div>
   </div>`;
 }
