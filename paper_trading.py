@@ -70,16 +70,18 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
         CREATE INDEX IF NOT EXISTS idx_paper_asset  ON paper_trades(asset);
-        CREATE INDEX IF NOT EXISTS idx_paper_version ON paper_trades(version);
     """)
-    # Migracion idempotente: best_price para trailing (gatillo 3)
+    # Migraciones idempotentes para bases de datos creadas ANTES de estas
+    # columnas (asi no se rompe si ya tenias paper trades registrados).
+    # IMPORTANTE: el ALTER TABLE tiene que ejecutarse ANTES de crear cualquier
+    # indice sobre esa columna, o falla con "no such column" en tablas viejas.
     cols = [r[1] for r in conn.execute("PRAGMA table_info(paper_trades)")]
     if "best_price" not in cols:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN best_price REAL")
-    # Migracion idempotente: version, para correr v1 y v2 en paralelo y comparar.
-    # Filas existentes (todo lo previo a esto) se marcan 'v1' por default.
     if "version" not in cols:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN version TEXT NOT NULL DEFAULT 'v1'")
+    # El indice de version se crea DESPUES de garantizar que la columna existe.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_version ON paper_trades(version)")
     conn.commit()
     conn.close()
 
