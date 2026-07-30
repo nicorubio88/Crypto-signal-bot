@@ -237,10 +237,18 @@
   <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:16px">
     <div style="font-size:0.85rem;color:#adbac7;line-height:1.5">El bot abre operaciones <b>ficticias</b> siguiendo sus señales, con stop y objetivo, y mide el resultado real de operarlas — sin arriesgar plata. Es la validación honesta antes de pensar en ejecución real.</div>
   </div>
+  <div style="display:flex;gap:6px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+    <span style="font-size:0.7rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-right:4px">Método</span>
+    <button class="tf-btn tf-active" data-pv="v1" onclick="setPaperVersion('v1')">v1 (actual)</button>
+    <button class="tf-btn" data-pv="v2" onclick="setPaperVersion('v2')">v2 (Agustín)</button>
+    <button class="tf-btn" data-pv="compare" onclick="setPaperVersion('compare')">Comparar</button>
+    <span style="font-size:0.62rem;color:#6e7681;margin-left:8px">v2 = RSI-1H + POC + Fibonacci + VWAP-1H, corriendo en paralelo</span>
+  </div>
   <div id="paper-summary"></div>
-  <h2 style="font-size:1rem;color:#58a6ff;margin:20px 0 12px">Operaciones de papel abiertas</h2>
+  <div id="paper-compare" class="hidden"></div>
+  <h2 id="paper-open-title" style="font-size:1rem;color:#58a6ff;margin:20px 0 12px">Operaciones de papel abiertas</h2>
   <div id="paper-open"></div>
-  <h2 style="font-size:1rem;color:#58a6ff;margin:24px 0 12px">Historial de papel</h2>
+  <h2 id="paper-closed-title" style="font-size:1rem;color:#58a6ff;margin:24px 0 12px">Historial de papel</h2>
   <div id="paper-closed"></div>
 </div>
 
@@ -983,57 +991,102 @@ async function submitCloseOp() {
 
 // ── Stats y history ──────────────────────────────────────────────────────────
 
-async function loadPaper() {
-  const res = await fetch('/api/paper');
-  const s = await res.json();
+let paperVersion = 'v1';
 
-  const fmtPct = v => (v==null) ? '—' : (v>0?'+':'') + v + '%';
+function setPaperVersion(v) {
+  paperVersion = v;
+  document.querySelectorAll('[data-pv]').forEach(b => b.classList.toggle('tf-active', b.dataset.pv === v));
+  loadPaper();
+}
+
+function fmtPaperPct(v) { return (v==null) ? '—' : (v>0?'+':'') + v + '%'; }
+
+// Arma el HTML de resumen + abiertas + cerradas para UNA version, dado su dict de stats
+function renderPaperSummary(s) {
   const wrColor = (s.win_rate==null) ? '#8b949e' : (s.win_rate>=50 ? '#3fb950' : '#f85149');
   const pnlColor = (s.total_pnl_net_pct>0) ? '#3fb950' : '#f85149';
-
-  document.getElementById('paper-summary').innerHTML = `
+  return `
     <div class="stats-grid">
       <div class="stat-card"><div class="stat-label">Operaciones cerradas</div><div class="stat-value">${s.closed_count}</div></div>
       <div class="stat-card"><div class="stat-label">Win rate</div><div class="stat-value" style="color:${wrColor}">${s.win_rate==null?'—':s.win_rate+'%'}</div><div class="stat-sub">${s.wins}W / ${s.losses}L</div></div>
-      <div class="stat-card"><div class="stat-label">PnL neto acumulado</div><div class="stat-value" style="color:${pnlColor}">${fmtPct(s.total_pnl_net_pct)}</div><div class="stat-sub">con fees incluidas</div></div>
+      <div class="stat-card"><div class="stat-label">PnL neto acumulado</div><div class="stat-value" style="color:${pnlColor}">${fmtPaperPct(s.total_pnl_net_pct)}</div><div class="stat-sub">con fees incluidas</div></div>
       <div class="stat-card"><div class="stat-label">Abiertas ahora</div><div class="stat-value">${s.open_count}</div></div>
     </div>
     <div style="font-size:0.8rem;color:#8b949e;margin-top:8px">
-      Ganancia media: <b style="color:#3fb950">${fmtPct(s.avg_win_pct)}</b> ·
-      Pérdida media: <b style="color:#f85149">${fmtPct(s.avg_loss_pct)}</b> ·
+      Ganancia media: <b style="color:#3fb950">${fmtPaperPct(s.avg_win_pct)}</b> ·
+      Pérdida media: <b style="color:#f85149">${fmtPaperPct(s.avg_loss_pct)}</b> ·
       Cierres: ${Object.entries(s.by_reason||{}).map(([k,v])=>`${k}: ${v}`).join(' · ') || '—'}
     </div>`;
+}
 
-  // Abiertas
-  if (!s.open_trades.length) {
-    document.getElementById('paper-open').innerHTML = '<div class="empty-state">Sin operaciones de papel abiertas. Se abren solas cuando el bot genera una señal.</div>';
-  } else {
-    document.getElementById('paper-open').innerHTML = s.open_trades.map(t => `
-      <div class="op-card">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <div><b style="color:#e6edf3">${t.asset}</b> <span style="color:${t.direction==='LONG'?'#3fb950':'#f85149'};font-weight:700">${t.direction}</span>
-            <span style="font-size:0.7rem;color:#8b949e;margin-left:8px">${t.regime||''}</span></div>
-          <div style="font-size:0.75rem;color:#8b949e">entrada $${fmt(t.entry_price)}</div>
+function renderPaperOpen(trades) {
+  if (!trades.length) return '<div class="empty-state">Sin operaciones de papel abiertas. Se abren solas cuando el bot genera una señal.</div>';
+  return trades.map(t => `
+    <div class="op-card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><b style="color:#e6edf3">${t.asset}</b> <span style="color:${t.direction==='LONG'?'#3fb950':'#f85149'};font-weight:700">${t.direction}</span>
+          <span style="font-size:0.7rem;color:#8b949e;margin-left:8px">${t.regime||''}</span></div>
+        <div style="font-size:0.75rem;color:#8b949e">entrada $${fmt(t.entry_price)}</div>
+      </div>
+      <div style="font-size:0.75rem;color:#8b949e;margin-top:6px">Stop: $${fmt(t.stop_loss)} · Objetivo: $${fmt(t.take_profit)} · Score ${t.score} · ${t.confidence}</div>
+    </div>`).join('');
+}
+
+function renderPaperClosed(trades) {
+  if (!trades.length) return '<div class="empty-state">Todavía no se cerró ninguna operación de papel.</div>';
+  return trades.map(t => {
+    const win = (t.pnl_pct_net||0) > 0;
+    return `<div class="op-card" style="border-left:3px solid ${win?'#3fb950':'#f85149'}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><b style="color:#e6edf3">${t.asset}</b> <span style="color:${t.direction==='LONG'?'#3fb950':'#f85149'}">${t.direction}</span></div>
+        <div style="font-weight:700;color:${win?'#3fb950':'#f85149'}">${(t.pnl_pct_net>0?'+':'')}${t.pnl_pct_net}%</div>
+      </div>
+      <div style="font-size:0.72rem;color:#8b949e;margin-top:4px">$${fmt(t.entry_price)} → $${fmt(t.exit_price)} · cierre: ${t.exit_reason}</div>
+    </div>`;
+  }).join('');
+}
+
+async function loadPaper() {
+  if (paperVersion === 'compare') {
+    const res = await fetch('/api/paper/compare');
+    const data = await res.json();
+
+    document.getElementById('paper-summary').classList.add('hidden');
+    document.getElementById('paper-open-title').classList.add('hidden');
+    document.getElementById('paper-open').classList.add('hidden');
+    document.getElementById('paper-closed-title').classList.add('hidden');
+    document.getElementById('paper-closed').classList.add('hidden');
+
+    const cmp = document.getElementById('paper-compare');
+    cmp.classList.remove('hidden');
+    cmp.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <h3 style="font-size:0.85rem;color:#58a6ff;margin-bottom:8px">v1 — sistema actual (17 indicadores)</h3>
+          ${renderPaperSummary(data.v1)}
         </div>
-        <div style="font-size:0.75rem;color:#8b949e;margin-top:6px">Stop: $${fmt(t.stop_loss)} · Objetivo: $${fmt(t.take_profit)} · Score ${t.score} · ${t.confidence}</div>
-      </div>`).join('');
+        <div>
+          <h3 style="font-size:0.85rem;color:#d29922;margin-bottom:8px">v2 — método Agustín (RSI-1H + POC + Fib + VWAP-1H)</h3>
+          ${renderPaperSummary(data.v2)}
+        </div>
+      </div>
+      <div style="font-size:0.72rem;color:#6e7681;margin-top:12px;font-style:italic">${data.note}</div>`;
+    return;
   }
 
-  // Cerradas
-  if (!s.recent_closed.length) {
-    document.getElementById('paper-closed').innerHTML = '<div class="empty-state">Todavía no se cerró ninguna operación de papel.</div>';
-  } else {
-    document.getElementById('paper-closed').innerHTML = s.recent_closed.map(t => {
-      const win = (t.pnl_pct_net||0) > 0;
-      return `<div class="op-card" style="border-left:3px solid ${win?'#3fb950':'#f85149'}">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <div><b style="color:#e6edf3">${t.asset}</b> <span style="color:${t.direction==='LONG'?'#3fb950':'#f85149'}">${t.direction}</span></div>
-          <div style="font-weight:700;color:${win?'#3fb950':'#f85149'}">${(t.pnl_pct_net>0?'+':'')}${t.pnl_pct_net}%</div>
-        </div>
-        <div style="font-size:0.72rem;color:#8b949e;margin-top:4px">$${fmt(t.entry_price)} → $${fmt(t.exit_price)} · cierre: ${t.exit_reason}</div>
-      </div>`;
-    }).join('');
-  }
+  // Modo v1 o v2 individual
+  document.getElementById('paper-summary').classList.remove('hidden');
+  document.getElementById('paper-open-title').classList.remove('hidden');
+  document.getElementById('paper-open').classList.remove('hidden');
+  document.getElementById('paper-closed-title').classList.remove('hidden');
+  document.getElementById('paper-closed').classList.remove('hidden');
+  document.getElementById('paper-compare').classList.add('hidden');
+
+  const res = await fetch('/api/paper?version=' + paperVersion);
+  const s = await res.json();
+  document.getElementById('paper-summary').innerHTML = renderPaperSummary(s);
+  document.getElementById('paper-open').innerHTML = renderPaperOpen(s.open_trades);
+  document.getElementById('paper-closed').innerHTML = renderPaperClosed(s.recent_closed);
 }
 
 async function loadStats() {
