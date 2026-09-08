@@ -1,40 +1,55 @@
 """
-Dashboard web v2.1 con gestion de operaciones
+Dashboard Flask + scheduler — Crypto & Stocks Signal Bot v4
+
+  - Analisis cripto completo cada N horas (config), chequeo rapido cada 2 min.
+  - Analisis de acciones/CEDEARs una vez por dia (config) y a pedido.
+  - Estado persistente en data/state.json (no re-envia alertas al reiniciar).
+  - Autenticacion por token (config "dashboard_token"). Si esta vacio, sin auth
+    (solo para uso local).
 """
 
 import json
+import threading
+from pathlib import Path
+from datetime import datetime, timezone
+
 import numpy as np
-from flask import Flask, render_template, Response, request
+from flask import Flask, render_template, Response, request, make_response
 from apscheduler.schedulers.background import BackgroundScheduler
-from engine import run_analysis, build_global_summary
-from telegram_bot import notify_if_signal, format_signal_message, send_message, format_regime_change_message, format_reversal_message, format_setup_message
+
+from data import CRYPTO_SYMBOLS, fetch_crypto_multi_tf, fetch_kraken, fetch_funding_rate
+from engine import analyze_crypto, apply_btc_filter, build_global_summary
+from stocks import (analyze_watchlist, build_stocks_summary, load_watchlist, add_to_watchlist,
+                    update_watchlist_item, remove_from_watchlist)
+from telegram_bot import (send_message, format_signal_message, format_action_change_message,
+                          format_level_message, format_stocks_digest)
 from tracker import save_signal, update_outcomes, get_stats, get_all_signals, get_evolution_report
 import paper_trading as paper
-from operations import (
-    create_operation, close_operation, update_levels,
-    edit_operation, delete_operation,
-    get_open_operations, get_closed_operations,
-    enrich_open_with_market, get_summary_stats
-)
-from pathlib import Path
-from datetime import datetime
+from operations import (create_operation, close_operation, update_levels, edit_operation,
+                        delete_operation, get_open_operations, get_closed_operations,
+                        enrich_open_with_market, get_summary_stats)
+import backtest as bt
+
+BASE = Path(__file__).parent
+CONFIG_PATH = BASE / "config.json"
+DATA_DIR = BASE / "data"
+CACHE_CRYPTO = DATA_DIR / "last_crypto.json"
+CACHE_STOCKS = DATA_DIR / "last_stocks.json"
+STATE_PATH = DATA_DIR / "state.json"
 
 app = Flask(__name__)
-
-CONFIG_PATH = Path(__file__).parent / "config.json"
-CACHE_PATH  = Path(__file__).parent / "data" / "last_results.json"
+lock = threading.Lock()
 
 state = {
-    "results": [],
-    "last_update": None,
-    "global_summary": None,  # resumen global del mercado (4 activos)
-    "last_signals": {},
-    "last_regimes": {},  # tracking de regimen anterior por activo (cambio de regimen)
-    "last_reversal": {},  # tracking de alerta de giro ya enviada por activo
-    "last_setup": {},  # tracking de setup de corto plazo por activo
-    "last_signals_v2": {},  # tracking de señal v2 por activo (metodo Agustin)
-    "operation_alerts_sent": {},  # tracking de alertas ya enviadas por operacion
+    "crypto": [], "crypto_summary": None, "crypto_updated": None,
+    "stocks": [], "stocks_summary": None, "stocks_updated": None,
+    "last_signal": {}, "last_action": {}, "last_level_alert": {}, "op_alerts": {},
+    "frames_1h": {},  # ultimo df 1h por activo (para outcomes / paper)
 }
+
+
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def load_config():
@@ -44,424 +59,425 @@ def load_config():
     return {}
 
 
-def sanitize(obj):
-    if isinstance(obj, dict):  return {k: sanitize(v) for k, v in obj.items()}
-    if isinstance(obj, list):  return [sanitize(i) for i in obj]
-    if isinstance(obj, (bool, np.bool_)): return bool(obj)
-    if isinstance(obj, (np.integer,)): return int(obj)
-    if isinstance(obj, (np.floating,)): return float(obj)
-    if hasattr(obj, 'item'): return obj.item()
-    return obj
+def sanitize(o):
+    if isinstance(o, dict):
+        return {k: sanitize(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [sanitize(i) for i in o]
+    if isinstance(o, (bool, np.bool_)):
+        return bool(o)
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return None if np.isnan(o) else float(o)
+    if isinstance(o, float) and o != o:
+        return None
+    if hasattr(o, "isoformat"):
+        return o.isoformat()
+    return o
 
 
-def check_operation_alerts(operations: list):
-    """Envia alertas Telegram para operaciones abiertas."""
-    for op in operations:
-        op_id = op["id"]
-        sent = state["operation_alerts_sent"].setdefault(op_id, set())
+def _json(obj, status=200):
+    return Response(json.dumps(sanitize(obj), ensure_ascii=False), status=status, mimetype="application/json")
 
-        # Stop cercano (1.5%)
+
+# ── Estado persistente ────────────────────────────────────────────────────────
+
+def save_state():
+    DATA_DIR.mkdir(exist_ok=True)
+    persist = {k: state[k] for k in ("last_signal", "last_action", "last_level_alert")}
+    persist["op_alerts"] = {str(k): sorted(v) for k, v in state["op_alerts"].items()}
+    with open(STATE_PATH, "w") as f:
+        json.dump(persist, f)
+
+
+def load_state():
+    if STATE_PATH.exists():
+        try:
+            with open(STATE_PATH) as f:
+                p = json.load(f)
+            for k in ("last_signal", "last_action", "last_level_alert"):
+                state[k] = p.get(k, {})
+            state["op_alerts"] = {int(k): set(v) for k, v in p.get("op_alerts", {}).items()}
+        except Exception as e:
+            print(f"No se pudo cargar state.json: {e}")
+    for path, key, skey, ukey in ((CACHE_CRYPTO, "crypto", "crypto_summary", "crypto_updated"),
+                                  (CACHE_STOCKS, "stocks", "stocks_summary", "stocks_updated")):
+        if path.exists():
+            try:
+                with open(path) as f:
+                    c = json.load(f)
+                state[key], state[skey], state[ukey] = c["results"], c["summary"], c["updated"]
+            except Exception:
+                pass
+
+
+# ── Alertas ───────────────────────────────────────────────────────────────────
+
+def _notify_changes(r: dict, key: str):
+    """Envia Telegram si cambio la senal, la accion sugerida o llego a un nivel fuerte."""
+    signal = r["signal"]
+    prev_sig = state["last_signal"].get(key, "NEUTRAL")
+    if signal in ("LONG", "SHORT") and signal != prev_sig:
+        save_signal(r)
+        paper.open_trade(r)
+        send_message(format_signal_message(r))
+        print(f"  Senal: {key} -> {signal} {r.get('setup')} ({r['confidence']})")
+    state["last_signal"][key] = signal
+
+    action = r["action"]
+    prev_action = state["last_action"].get(key)
+    if prev_action is not None and action != prev_action and signal == "NEUTRAL":
+        # cambio de lectura relevante (no avisar en el primer ciclo)
+        important = any(w in action for w in ("PROTEGER", "REDUCIR", "ACUMULAR", "VENDER", "ESPERAR EL PISO", "RUPTURA"))
+        if important:
+            send_message(format_action_change_message(r, prev_action))
+            print(f"  Cambio de lectura: {key} {prev_action} -> {action}")
+    state["last_action"][key] = action
+
+    # Llegada a nivel fuerte (una vez por nivel)
+    lv = r["levels"]
+    for kind, lvl in (("S", lv.get("nearest_support")), ("R", lv.get("nearest_resistance"))):
+        if lvl and lvl["strength"] >= 60 and abs(lvl["distance_pct"]) <= 1.0:
+            tag = f"{kind}:{round(lvl['price'], 2)}"
+            if state["last_level_alert"].get(key) != tag:
+                send_message(format_level_message(r, kind, lvl))
+                state["last_level_alert"][key] = tag
+
+
+def check_operation_alerts(ops: list):
+    for op in ops:
+        sent = state["op_alerts"].setdefault(op["id"], set())
         if op["stop_close"] and "stop_warn" not in sent:
-            msg = (f"AVISO: {op['asset']} {op['direction']}\n"
-                   f"Stop Loss cercano ({op['dist_stop']}%)\n"
-                   f"Precio: ${op['current_price']} | Stop: ${op['stop_loss']}\n"
-                   f"PnL actual: {op['pnl_pct']}%")
-            send_message(msg)
+            send_message(f"AVISO: {op['asset']} {op['direction']} — stop cercano ({op['dist_stop']}%)\n"
+                         f"Precio ${op['current_price']} | Stop ${op['stop_loss']} | PnL {op['pnl_pct']}%")
             sent.add("stop_warn")
-
-        # TPs alcanzados
-        for level in ["tp1", "tp2", "tp3"]:
-            key = f"{level}_reached"
-            if op.get(key) and level not in sent:
-                msg = (f"TP {level.upper()} ALCANZADO: {op['asset']} {op['direction']}\n"
-                       f"Precio: ${op['current_price']} | {level.upper()}: ${op[level]}\n"
-                       f"PnL: {op['pnl_pct']}% (${op['pnl_usd']})\n"
-                       f"Cerrar parcial recomendado")
-                send_message(msg)
-                sent.add(level)
-
-        # Bot cambio contra la posicion
-        if op["bot_changed_against"] and "bot_against" not in sent:
-            msg = (f"AVISO: {op['asset']} {op['direction']}\n"
-                   f"Bot cambio a {op['bot_current_signal']} - contra tu posicion\n"
-                   f"Score: {op['bot_current_score']} | Confianza: {op['bot_current_confidence']}\n"
-                   f"PnL actual: {op['pnl_pct']}%")
-            send_message(msg)
-            sent.add("bot_against")
-
-        # Señal de cierre con alta urgencia
+        for lvl in ("tp1", "tp2", "tp3"):
+            if op.get(f"{lvl}_reached") and lvl not in sent:
+                send_message(f"{lvl.upper()} ALCANZADO: {op['asset']} {op['direction']}\n"
+                             f"Precio ${op['current_price']} | PnL {op['pnl_pct']}% (${op['pnl_usd']})\nCerrar parcial recomendado")
+                sent.add(lvl)
+        if op["bot_changed_against"] and "against" not in sent:
+            send_message(f"AVISO: {op['asset']} {op['direction']} — el bot paso a {op['bot_current_signal']} (contra tu posicion)\n"
+                         f"Lectura: {op.get('bot_action')} | PnL {op['pnl_pct']}%")
+            sent.add("against")
         cs = op.get("close_signal") or {}
         if cs.get("urgency") == "ALTA" and "close_high" not in sent:
-            msg = (f"CERRAR {op['asset']} {op['direction']} (URGENCIA ALTA)\n"
-                   f"Razones: {', '.join(cs.get('reasons', []))}\n"
-                   f"Precio: ${op['current_price']} | PnL: {op['pnl_pct']}%")
-            send_message(msg)
+            send_message(f"CERRAR {op['asset']} {op['direction']} (URGENCIA ALTA)\n" + "\n".join(f"  * {x}" for x in cs["reasons"]) +
+                         f"\nPrecio ${op['current_price']} | PnL {op['pnl_pct']}%")
             sent.add("close_high")
 
 
-def regime_direction(regime: str) -> str:
-    """Agrupa los 9 regimenes en 3 direcciones para detectar cambios significativos."""
-    if not regime:
-        return "NEUTRO"
-    if "BULL" in regime:
-        return "ALCISTA"
-    if "BEAR" in regime:
-        return "BAJISTA"
-    return "NEUTRO"  # LATERAL, LATERAL ESTRICTO, TRANSICIÓN
+# ── Ciclos ────────────────────────────────────────────────────────────────────
 
-
-def refresh_data():
-    """Analisis completo: indicadores + scoring + señales. Ciclo lento (4h)."""
-    print(f"\n[{datetime.now().strftime('%H:%M UTC')}] Actualizando datos...")
-    results = run_analysis()
-    clean = sanitize(results)
-
-    for r in clean:
-        if r.get("error"): continue
-        update_outcomes(r["name"], r["price"])
-        # Paper trading v1 (sistema actual): actualizar abiertos y abrir nuevos
-        paper.update_paper_trades(r["name"], r["price"], r.get("signal"), r.get("reversal"), version="v1")
-        name = r["name"]
-        signal = r["signal"]
-        prev = state["last_signals"].get(name, "")
-        is_actionable = "LONG" in signal or "SHORT" in signal
-        changed = signal != prev
-        if is_actionable and changed:
-            save_signal(r)
-            paper.open_paper_trade(r, version="v1")  # abrir operacion ficticia siguiendo la señal
-            send_message(format_signal_message(r))
-            print(f"  Nueva señal: {name} -> {signal}")
-            state["last_signals"][name] = signal
-
-        # ── Paper trading v2 (metodo Agustin): corre EN PARALELO, mismo mercado ──
-        # Usa los mismos niveles SL/TP (misma gestion de riesgo) para aislar
-        # la comparacion a la logica de señal de entrada.
-        v2 = r.get("v2", {})
-        v2_signal = v2.get("signal", "NEUTRAL")
-        paper.update_paper_trades(name, r["price"], v2_signal, r.get("reversal"), version="v2")
-        prev_v2 = state["last_signals_v2"].get(name, "")
-        if ("LONG" in v2_signal or "SHORT" in v2_signal) and v2_signal != prev_v2:
-            v2_result = {**r, "signal": v2_signal, "score": v2.get("score"),
-                        "confidence": v2.get("confidence")}
-            paper.open_paper_trade(v2_result, version="v2")
-            print(f"  Nueva señal v2: {name} -> {v2_signal}")
-        state["last_signals_v2"][name] = v2_signal
-
-        # ── Alerta general de cambio de regimen (con o sin posicion abierta) ──
-        regime = r.get("regime", "")
-        prev_regime = state["last_regimes"].get(name)
-        new_dir = regime_direction(regime)
-        prev_dir = regime_direction(prev_regime) if prev_regime else None
-
-        # Solo avisa si la DIRECCION cambio (evita ruido tipo BEAR -> BEAR DÉBIL).
-        # No avisa en el primer ciclo (prev_regime None) para no spammear al arrancar.
-        if prev_regime is not None and prev_dir != new_dir:
-            send_message(format_regime_change_message(r, prev_regime))
-            print(f"  Cambio de regimen: {name} {prev_regime} -> {regime}")
-
-        state["last_regimes"][name] = regime
-
-        # ── Alerta de posible giro de tendencia (agotamiento detectado) ──
-        rev = r.get("reversal", {})
-        if rev.get("reversing"):
-            # Solo avisa una vez por episodio: si antes no estaba reversing
-            was_reversing = state["last_reversal"].get(name, False)
-            if not was_reversing:
-                send_message(format_reversal_message(r))
-                print(f"  Posible giro: {name} -> {rev.get('direction')} (score {rev.get('reversal_score')})")
-            state["last_reversal"][name] = True
-        else:
-            state["last_reversal"][name] = False
-
-        # ── Alerta de setup de corto plazo (timing 1H: rebote / continuacion) ──
-        st = r.get("short_setup", {})
-        setup = st.get("setup")
-        if setup in ("REBOTE", "CONTINUACION"):
-            # avisar solo cuando cambia el setup (no repetir el mismo cada ciclo)
-            prev_setup = state["last_setup"].get(name)
-            if setup != prev_setup:
-                send_message(format_setup_message(r))
-                print(f"  Setup 1H: {name} -> {setup} ({st.get('tipo')})")
-            state["last_setup"][name] = setup
-        else:
-            state["last_setup"][name] = None
-
-    CACHE_PATH.parent.mkdir(exist_ok=True)
-    with open(CACHE_PATH, "w") as f:
-        json.dump(clean, f, indent=2)
-
-    state["results"] = clean
-    state["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
-    state["global_summary"] = build_global_summary(clean)
-
-    # Chequear operaciones abiertas y enviar alertas
-    open_ops = get_open_operations()
-    if open_ops:
-        enriched = enrich_open_with_market(open_ops, clean)
-        check_operation_alerts(enriched)
-
-    print(f"  Analisis completo — {len(results)} activos | {len(open_ops)} ops abiertas")
-
-
-def check_paper_realtime():
-    """Chequeo rapido de SL/TP de paper trades (v1 y v2), corre siempre."""
-    open_v1 = paper.get_paper_stats("v1")["open_trades"]
-    open_v2 = paper.get_paper_stats("v2")["open_trades"]
-    if not open_v1 and not open_v2:
+def refresh_crypto():
+    if not lock.acquire(blocking=False):
+        print("refresh_crypto: ya hay un analisis corriendo")
         return
     try:
-        from engine import SYMBOLS, fetch_candles
-        assets = {t["asset"] for t in open_v1} | {t["asset"] for t in open_v2}
-        for asset in assets:
-            symbol = SYMBOLS.get(asset)
-            if not symbol:
+        cfg = load_config()
+        capital, risk = cfg.get("capital_disponible", 10000), cfg.get("risk_pct", 0.02)
+        print(f"\n[{_utcnow():%H:%M} UTC] Analisis cripto...")
+        results = []
+        for name, symbol in CRYPTO_SYMBOLS.items():
+            if name not in cfg.get("crypto_assets", list(CRYPTO_SYMBOLS)):
                 continue
             try:
-                df = fetch_candles(symbol, "1h", limit=2)
-                last_price = float(df.iloc[-1]["close"])
-                cached = next((r for r in state["results"] if r.get("name") == asset), {})
-                paper.update_paper_trades(asset, last_price, cached.get("signal"),
-                                          cached.get("reversal"), version="v1")
-                v2 = cached.get("v2", {})
-                paper.update_paper_trades(asset, last_price, v2.get("signal"),
-                                          cached.get("reversal"), version="v2")
+                dfs = fetch_crypto_multi_tf(symbol)
+                funding = fetch_funding_rate(name)
+                r = analyze_crypto(name, dfs, funding, capital, risk)
+                state["frames_1h"][name] = dfs["1h"]
             except Exception as e:
-                print(f"  Error paper check {asset}: {e}")
-    except Exception as e:
-        print(f"  Error en check_paper_realtime: {e}")
+                r = {"name": name, "error": str(e)[:200]}
+            results.append(r)
+        results = apply_btc_filter(results)
+        clean = sanitize(results)
+
+        for r in clean:
+            if r.get("error"):
+                print(f"  {r['name']}: ERROR {r['error']}")
+                continue
+            df1h = state["frames_1h"].get(r["name"])
+            if df1h is not None:
+                update_outcomes(r["name"], df1h)
+                last = df1h.iloc[-1]
+                paper.update_trades(r["name"], float(last["high"]), float(last["low"]), float(last["close"]),
+                                    r["signal"], r["exhaustion"])
+            _notify_changes(r, r["name"])
+
+        state["crypto"] = clean
+        state["crypto_summary"] = build_global_summary(clean)
+        state["crypto_updated"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        DATA_DIR.mkdir(exist_ok=True)
+        with open(CACHE_CRYPTO, "w") as f:
+            json.dump({"results": clean, "summary": state["crypto_summary"], "updated": state["crypto_updated"]}, f)
+        save_state()
+
+        ops = get_open_operations()
+        if ops:
+            check_operation_alerts(enrich_open_with_market(ops, clean))
+        print(f"  Cripto listo: {len(clean)} activos")
+    finally:
+        lock.release()
 
 
-def check_operations_realtime():
-    """
-    Chequeo rapido cada 2 min para alertas de SL/TP/liquidacion.
-    Usa precios actuales de Kraken sin recalcular indicadores.
-    """
-    check_paper_realtime()  # paper trades primero (independiente de ops manuales)
+def refresh_stocks(notify: bool = True):
+    cfg = load_config()
+    print(f"\n[{_utcnow():%H:%M} UTC] Analisis acciones/CEDEARs...")
+    results = sanitize(analyze_watchlist(cfg.get("capital_disponible", 10000), cfg.get("risk_pct", 0.02)))
+    for r in results:
+        if r.get("error"):
+            print(f"  {r.get('ticker')}: ERROR {r['error']}")
+            continue
+        try:
+            from data import fetch_yahoo
+            update_outcomes(r["ticker"], fetch_yahoo(r["ticker"], period="3mo", interval="1d"))
+        except Exception:
+            pass
+        if r["signal"] in ("LONG", "SHORT") and state["last_signal"].get(r["ticker"]) != r["signal"]:
+            save_signal(r)
+            paper.open_trade(r)
+        state["last_signal"][r["ticker"]] = r["signal"]
+        state["last_action"][r["ticker"]] = r["action"]
+    state["stocks"] = results
+    state["stocks_summary"] = build_stocks_summary(results)
+    state["stocks_updated"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    DATA_DIR.mkdir(exist_ok=True)
+    with open(CACHE_STOCKS, "w") as f:
+        json.dump({"results": results, "summary": state["stocks_summary"], "updated": state["stocks_updated"]}, f)
+    save_state()
+    if notify and cfg.get("stocks_telegram_digest", True):
+        send_message(format_stocks_digest(results, state["stocks_summary"]))
+    print(f"  Acciones listo: {len(results)} tickers")
+
+
+def check_realtime():
+    """Cada 2 min: precios actuales para paper trades y operaciones abiertas."""
     open_ops = get_open_operations()
-    if not open_ops:
-        return  # nada mas que chequear
-
-    try:
-        # Fetch solo precios actuales (1 vela 1h, mucho mas rapido que analisis completo)
-        from engine import SYMBOLS, fetch_candles
-        market_snapshots = []
-
-        for op in open_ops:
-            asset = op["asset"]
-            if not any(s["name"] == asset for s in market_snapshots):
-                symbol = SYMBOLS.get(asset)
-                if not symbol: continue
-                try:
-                    df = fetch_candles(symbol, "1h", limit=2)
-                    last_price = float(df.iloc[-1]["close"])
-                    # Buscar datos del bot en cache (signal/score actual)
-                    cached = next((r for r in state["results"] if r.get("name") == asset), {})
-                    market_snapshots.append({
-                        "name": asset,
-                        "price": last_price,
-                        "signal": cached.get("signal", "NEUTRAL"),
-                        "score": cached.get("score", 0),
-                        "confidence": cached.get("confidence", "—"),
-                        "close_long": cached.get("close_long", {"should_close": False}),
-                        "close_short": cached.get("close_short", {"should_close": False}),
-                    })
-                except Exception as e:
-                    print(f"  Error fetch precio {asset}: {e}")
-                    continue
-
-        if market_snapshots:
-            enriched = enrich_open_with_market(open_ops, market_snapshots)
-            check_operation_alerts(enriched)
-    except Exception as e:
-        print(f"  Error en check_operations_realtime: {e}")
+    open_paper = {t["asset"] for t in paper.get_stats("crypto")["open_trades"]}
+    assets = {op["asset"] for op in open_ops} | open_paper
+    if not assets:
+        return
+    snapshots = []
+    for asset in assets:
+        symbol = CRYPTO_SYMBOLS.get(asset)
+        if not symbol:
+            continue
+        try:
+            df = fetch_kraken(symbol, "1h", limit=2)
+            last = df.iloc[-1]
+            cached = next((r for r in state["crypto"] if r.get("name") == asset and not r.get("error")), {})
+            paper.update_trades(asset, float(last["high"]), float(last["low"]), float(last["close"]),
+                                cached.get("signal"), cached.get("exhaustion"))
+            snap = dict(cached) if cached else {"name": asset}
+            snap["price"] = float(last["close"])
+            snapshots.append(snap)
+        except Exception as e:
+            print(f"  Error precio {asset}: {e}")
+    if open_ops and snapshots:
+        check_operation_alerts(enrich_open_with_market(open_ops, snapshots))
+        save_state()
 
 
-# ── Rutas web ────────────────────────────────────────────────────────────────
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+@app.before_request
+def _auth():
+    token = load_config().get("dashboard_token", "")
+    if not token:
+        return None
+    if request.path == "/login" or request.path.startswith("/static/"):
+        return None
+    provided = request.cookies.get("token") or request.headers.get("X-Token") or request.args.get("token")
+    if provided == token:
+        return None
+    if request.path == "/":
+        return render_template("dashboard.html", need_login=True)
+    return _json({"error": "no autorizado"}, 401)
+
+
+@app.route("/login", methods=["POST"])
+def login():
+    token = load_config().get("dashboard_token", "")
+    data = request.get_json(silent=True) or {}
+    if data.get("token") == token:
+        resp = make_response(_json({"ok": True}))
+        resp.set_cookie("token", token, max_age=3600 * 24 * 90, httponly=True, samesite="Lax")
+        return resp
+    return _json({"ok": False, "error": "token incorrecto"}, 401)
+
+
+# ── Rutas ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
-    return render_template("dashboard.html")
+    return render_template("dashboard.html", need_login=False)
 
 
 @app.route("/api/data")
 def api_data():
-    # Selector de timeframe (solo para vista). Default 4h = cache del scheduler.
-    # 1h o 1d se recalculan en vivo SIN tocar registro de señales ni paper trading.
-    tf = request.args.get("tf", "4h")
-    if tf not in ("1h", "4h", "1d"):
-        tf = "4h"
-
-    if tf == "4h":
-        results = state["results"]
-        last_update = state["last_update"]
-        global_summary = state["global_summary"]
-    else:
-        # Recalculo on-demand en el marco pedido (tarda unos segundos)
-        from engine import run_analysis, build_global_summary
-        results = sanitize(run_analysis(main_tf=tf))
-        last_update = datetime.now().strftime("%Y-%m-%d %H:%M UTC") + f" (vista {tf})"
-        global_summary = build_global_summary(results)
-
-    return Response(json.dumps(sanitize({
-        "results": results,
-        "last_update": last_update,
-        "global_summary": global_summary,
-        "timeframe": tf,
-        "config": {
-            "capital": load_config().get("capital_disponible", 10000),
-            "risk_pct": load_config().get("risk_pct", 0.025),
-        }
-    })), mimetype="application/json")
+    cfg = load_config()
+    return _json({"results": state["crypto"], "summary": state["crypto_summary"],
+                  "last_update": state["crypto_updated"],
+                  "config": {"capital": cfg.get("capital_disponible", 10000), "risk_pct": cfg.get("risk_pct", 0.02)}})
 
 
 @app.route("/api/refresh")
 def api_refresh():
-    refresh_data()
-    return Response(json.dumps({"ok": True, "last_update": state["last_update"]}),
-                    mimetype="application/json")
+    threading.Thread(target=refresh_crypto, daemon=True).start()
+    return _json({"ok": True, "msg": "analisis cripto lanzado en segundo plano"})
+
+
+@app.route("/api/stocks")
+def api_stocks():
+    return _json({"results": state["stocks"], "summary": state["stocks_summary"],
+                  "last_update": state["stocks_updated"], "watchlist": load_watchlist()})
+
+
+@app.route("/api/stocks/refresh")
+def api_stocks_refresh():
+    threading.Thread(target=refresh_stocks, kwargs={"notify": False}, daemon=True).start()
+    return _json({"ok": True, "msg": "analisis de acciones lanzado en segundo plano"})
+
+
+@app.route("/api/watchlist", methods=["GET", "POST"])
+def api_watchlist():
+    if request.method == "GET":
+        return _json(load_watchlist())
+    return _json(add_to_watchlist(request.get_json(force=True) or {}))
+
+
+@app.route("/api/watchlist/<ticker>", methods=["POST", "DELETE"])
+def api_watchlist_item(ticker):
+    if request.method == "DELETE":
+        return _json(remove_from_watchlist(ticker))
+    return _json(update_watchlist_item(ticker, request.get_json(force=True) or {}))
+
+
+@app.route("/api/candles/<asset>")
+def api_candles(asset):
+    """Velas + niveles para el grafico. ?tf=1h|4h|1d|1w  &type=crypto|stock"""
+    tf = request.args.get("tf", "4h")
+    typ = request.args.get("type", "crypto")
+    try:
+        if typ == "crypto":
+            symbol = CRYPTO_SYMBOLS.get(asset.upper())
+            if not symbol:
+                return _json({"error": "activo desconocido"}, 404)
+            df = fetch_kraken(symbol, tf if tf in ("1h", "4h", "1d", "1w") else "4h", 400)
+        else:
+            from data import fetch_yahoo
+            period, interval = {"1h": ("3mo", "1h"), "1d": ("2y", "1d"), "1w": ("10y", "1wk")}.get(tf, ("2y", "1d"))
+            df = fetch_yahoo(asset, period=period, interval=interval)
+        from indicators import add_indicators
+        add_indicators(df)
+        rows = [{"time": int(t.timestamp()), "open": o, "high": h, "low": l, "close": c, "volume": v,
+                 "ema20": None if np.isnan(e20) else e20, "ema50": None if np.isnan(e50) else e50,
+                 "ema200": None if np.isnan(e200) else e200}
+                for t, o, h, l, c, v, e20, e50, e200 in zip(df.index, df["open"], df["high"], df["low"], df["close"],
+                                                           df["volume"], df["EMA20"], df["EMA50"], df["EMA200"])]
+        pool = state["crypto"] if typ == "crypto" else state["stocks"]
+        key = "name" if typ == "crypto" else "ticker"
+        cached = next((r for r in pool if r.get(key, "").upper() == asset.upper() and not r.get("error")), None)
+        return _json({"candles": rows, "levels": cached["levels"] if cached else None,
+                      "plan": cached.get("plan") if cached else None})
+    except Exception as e:
+        return _json({"error": str(e)[:200]}, 500)
 
 
 @app.route("/api/stats")
 def api_stats():
-    return Response(json.dumps(sanitize(get_stats())), mimetype="application/json")
-
-
-@app.route("/api/backtest/<asset>")
-def api_backtest(asset):
-    """Corre backtest de la logica sobre histrico de Kraken para un activo."""
-    import backtest as bt
-    from engine import SYMBOLS, fetch_candles, calculate_indicators, calculate_score, get_levels, get_adaptive_threshold
-    asset = asset.upper()
-    symbol = SYMBOLS.get(asset)
-    if not symbol:
-        return Response(json.dumps({"error": f"Activo {asset} no reconocido"}), mimetype="application/json")
-    try:
-        df = fetch_candles(symbol, "4h", limit=720)  # ~120 dias de velas 4h
-        df = calculate_indicators(df)
-        result = bt.run_backtest(df, calculate_score, get_levels, None, get_adaptive_threshold)
-        result["asset"] = asset
-        result["candles_analyzed"] = len(df)
-        return Response(json.dumps(sanitize(result), indent=2), mimetype="application/json")
-    except Exception as e:
-        return Response(json.dumps({"error": str(e)}), mimetype="application/json")
-
-
-@app.route("/api/paper")
-def api_paper():
-    """Estadisticas del paper trading automatico (validacion sin riesgo). ?version=v1|v2"""
-    version = request.args.get("version", "v1")
-    if version not in ("v1", "v2"):
-        version = "v1"
-    return Response(json.dumps(sanitize(paper.get_paper_stats(version)), indent=2),
-                    mimetype="application/json")
-
-
-@app.route("/api/paper/compare")
-def api_paper_compare():
-    """Compara v1 (sistema actual) vs v2 (metodo Agustin/Joven Inversor)."""
-    return Response(json.dumps(sanitize(paper.get_paper_stats_compare()), indent=2),
-                    mimetype="application/json")
+    return _json(get_stats(request.args.get("type", "crypto")))
 
 
 @app.route("/api/evolution")
 def api_evolution():
-    """Reporte completo de evolucion del bot — pensado para analisis."""
-    return Response(json.dumps(sanitize(get_evolution_report()), indent=2),
-                    mimetype="application/json")
+    return _json(get_evolution_report(request.args.get("type", "crypto")))
 
 
 @app.route("/api/signals")
 def api_signals():
-    return Response(json.dumps(sanitize(get_all_signals(100))), mimetype="application/json")
+    return _json(get_all_signals(150, request.args.get("type")))
 
 
-# ── Operaciones ─────────────────────────────────────────────────────────────
+@app.route("/api/paper")
+def api_paper():
+    return _json(paper.get_stats(request.args.get("type", "crypto")))
 
+
+@app.route("/api/backtest/<asset>")
+def api_backtest(asset):
+    try:
+        return _json(bt.run_backtest_asset(asset.upper(), source=request.args.get("source", "yahoo")))
+    except Exception as e:
+        return _json({"error": str(e)[:300]}, 500)
+
+
+# Operaciones manuales
 @app.route("/api/operations/open")
 def api_ops_open():
-    ops = get_open_operations()
-    enriched = enrich_open_with_market(ops, state["results"])
-    return Response(json.dumps(sanitize(enriched)), mimetype="application/json")
+    return _json(enrich_open_with_market(get_open_operations(), state["crypto"]))
 
 
 @app.route("/api/operations/closed")
 def api_ops_closed():
-    ops = get_closed_operations(50)
-    return Response(json.dumps(sanitize(ops)), mimetype="application/json")
+    return _json(get_closed_operations(50))
 
 
 @app.route("/api/operations/summary")
 def api_ops_summary():
-    return Response(json.dumps(sanitize(get_summary_stats())), mimetype="application/json")
+    return _json(get_summary_stats())
 
 
 @app.route("/api/operations/create", methods=["POST"])
 def api_op_create():
-    data = request.json
-    # Limpiar tracking de alertas para nuevas operaciones
-    result = create_operation(data)
-    return Response(json.dumps(result), mimetype="application/json")
+    return _json(create_operation(request.get_json(force=True)))
 
 
 @app.route("/api/operations/<int:op_id>/close", methods=["POST"])
 def api_op_close(op_id):
-    data = request.json
-    result = close_operation(op_id, float(data["exit_price"]), data.get("reason", "manual"))
-    # Limpiar tracking
-    state["operation_alerts_sent"].pop(op_id, None)
-    return Response(json.dumps(sanitize(result)), mimetype="application/json")
+    d = request.get_json(force=True)
+    res = close_operation(op_id, float(d["exit_price"]), d.get("reason", "manual"))
+    state["op_alerts"].pop(op_id, None)
+    return _json(res)
 
 
 @app.route("/api/operations/<int:op_id>/update", methods=["POST"])
 def api_op_update(op_id):
-    data = request.json
-    result = update_levels(
-        op_id,
-        stop_loss=float(data["stop_loss"]) if data.get("stop_loss") else None,
-        tp1=float(data["tp1"]) if data.get("tp1") else None,
-        tp2=float(data["tp2"]) if data.get("tp2") else None,
-        tp3=float(data["tp3"]) if data.get("tp3") else None,
-    )
-    return Response(json.dumps(result), mimetype="application/json")
+    d = request.get_json(force=True)
+    return _json(update_levels(op_id, **{k: float(d[k]) for k in ("stop_loss", "tp1", "tp2", "tp3") if d.get(k)}))
 
 
 @app.route("/api/operations/<int:op_id>/edit", methods=["POST"])
 def api_op_edit(op_id):
-    """Edita todos los campos de una operacion abierta (corregir errores)."""
-    result = edit_operation(op_id, request.json)
-    return Response(json.dumps(sanitize(result)), mimetype="application/json")
+    return _json(edit_operation(op_id, request.get_json(force=True)))
 
 
 @app.route("/api/operations/<int:op_id>/delete", methods=["POST"])
 def api_op_delete(op_id):
-    """Borra una operacion de forma permanente."""
-    result = delete_operation(op_id)
-    state["operation_alerts_sent"].pop(op_id, None)
-    return Response(json.dumps(result), mimetype="application/json")
+    state["op_alerts"].pop(op_id, None)
+    return _json(delete_operation(op_id))
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if CACHE_PATH.exists():
-        try:
-            with open(CACHE_PATH) as f:
-                state["results"] = json.load(f)
-            print("Cache cargado")
-        except Exception: pass
-
-    refresh_data()
-
+    load_state()
     cfg = load_config()
-    full_interval = cfg.get("full_analysis_interval_hours", 4)
-    ops_interval = cfg.get("ops_check_interval_minutes", 2)
+    if not cfg.get("dashboard_token"):
+        print("AVISO: dashboard sin token (config dashboard_token). Solo para uso local.")
+    threading.Thread(target=refresh_crypto, daemon=True).start()
+    if cfg.get("stocks_enabled", True) and not state["stocks"]:
+        threading.Thread(target=refresh_stocks, kwargs={"notify": False}, daemon=True).start()
 
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(refresh_data, "interval", hours=full_interval, id="full_analysis")
-    scheduler.add_job(check_operations_realtime, "interval", minutes=ops_interval, id="ops_check")
-    scheduler.start()
-    print(f"Scheduler activo:")
-    print(f"  - Analisis completo cada {full_interval}h")
-    print(f"  - Check de operaciones cada {ops_interval}min")
-    print("Dashboard en http://localhost:5000\n")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    sched = BackgroundScheduler(timezone="UTC")
+    sched.add_job(refresh_crypto, "interval", hours=cfg.get("full_analysis_interval_hours", 4), id="crypto")
+    sched.add_job(check_realtime, "interval", minutes=cfg.get("ops_check_interval_minutes", 2), id="realtime")
+    if cfg.get("stocks_enabled", True):
+        # Un analisis de acciones tras el cierre de Wall Street (21:30 UTC) y otro a mitad de rueda
+        for hh in cfg.get("stocks_hours_utc", [15, 21]):
+            sched.add_job(refresh_stocks, "cron", hour=hh, minute=35, id=f"stocks_{hh}")
+    sched.start()
+    host = cfg.get("host", "127.0.0.1")
+    print(f"Dashboard en http://{host}:{cfg.get('port', 5000)}")
+    app.run(host=host, port=cfg.get("port", 5000), debug=False, threaded=True)

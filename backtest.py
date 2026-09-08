@@ -1,137 +1,189 @@
 """
-Backtest de la logica del bot sobre datos historicos.
-Recorre velas pasadas, calcula la señal que el bot HABRIA dado en cada punto,
-simula entrar con SL/TP y mide el resultado.
+Backtest multi-timeframe del motor v4.
 
-IMPORTANTE: un backtest NO es prediccion. Esta sobreajustado al pasado y no
-captura del todo slippage ni condiciones de baja liquidez. Sirve para tener
-una referencia historica, no para confiar ciegamente. El paper trading en vivo
-es mas honesto porque opera sobre datos que el bot no "vio" antes.
+Recorre la historia vela a vela en el marco de referencia (4H cripto / 1D
+acciones), reconstruye los otros timeframes SOLO con datos anteriores a esa
+vela (sin lookahead), corre analyze_frames y simula el plan (entrada al
+precio de cierre, stop/TP1 con high-low, salida por senal contraria, agotamiento
+o tiempo maximo). Fees 0.05 % por lado.
+
+Fuente de datos:
+  - "yahoo": BTC-USD 1h de 2 anios (se resamplea a 4h/1d/1w) — recomendado.
+  - "kraken": solo las ultimas 720 velas (unos 4 meses en 4H).
+  - "synthetic": datos generados, solo para probar el codigo.
+
+Un backtest no predice nada: sirve para saber si la logica tiene ventaja
+estadistica y para calibrar. El paper trading en vivo es la validacion honesta.
 """
 
+import time
 import pandas as pd
-from datetime import datetime
+from datetime import timedelta
 
-FEE_PCT = 0.05  # taker Binance por lado
+from indicators import resample_ohlcv
+from engine import prepare_frames, analyze_frames
+
+FEE_PCT = 0.05
+MAX_BARS = {"crypto": 12, "stock": 15}   # 12 velas de 4h = 48h; 15 dias
 
 
-def run_backtest(df: pd.DataFrame, calculate_score_fn, get_levels_fn,
-                 get_signal_fn, get_adaptive_threshold_fn,
-                 min_history: int = 210) -> dict:
+def run_backtest(h1: pd.DataFrame, asset_type: str = "crypto", name: str = "BT",
+                 step: int = 1, min_bars: int = 250, max_bars: int | None = None,
+                 allow_short: bool = True, progress: bool = False) -> dict:
     """
-    Recorre el df vela por vela simulando la operativa del bot.
-
-    Para cada vela (a partir de min_history para tener indicadores validos):
-      1. Calcula score y señal con los datos disponibles HASTA esa vela
-      2. Si hay señal accionable y no hay trade abierto, entra con SL/TP1
-      3. Si hay trade abierto, chequea si la vela toco SL o TP
-
-    Devuelve estadisticas del periodo: nro de trades, win rate, PnL neto.
+    h1: velas de 1h (cripto) o 1d (acciones) de toda la historia.
     """
-    trades = []
-    open_trade = None
+    if asset_type == "crypto":
+        ref_all = resample_ohlcv(h1, "4h")
+        ref_tf = "4h"
+    else:
+        ref_all = h1
+        ref_tf = "1d"
+    n = len(ref_all)
+    if n < min_bars + 20:
+        return {"error": f"historia insuficiente ({n} velas de {ref_tf})"}
+    end = n if max_bars is None else min(n, min_bars + max_bars)
 
-    n = len(df)
-    if n < min_history + 10:
-        return {"error": f"Datos insuficientes: {n} velas (minimo {min_history+10})"}
+    trades, open_trade = [], None
+    signals_seen = 0
+    t0 = time.time()
+    for i in range(min_bars, end, step):
+        bar_time = ref_all.index[i]
+        bar = ref_all.iloc[i]
+        # Datos disponibles: todo lo ANTERIOR a la apertura de la vela i, mas la vela i
+        # como "vela actual" (el motor usa iloc[-2] como ultima cerrada).
+        ref = ref_all.iloc[max(0, i - 500): i + 1]
+        if asset_type == "crypto":
+            h = h1[h1.index < bar_time + timedelta(hours=4)].tail(400)
+            d = resample_ohlcv(h1[h1.index < bar_time + timedelta(hours=4)], "1D").tail(400)
+            w = resample_ohlcv(h1[h1.index < bar_time + timedelta(hours=4)], "W-MON")
+            frames_raw = {"1h": h, "4h": ref, "1d": d, "1w": w}
+        else:
+            d = ref
+            w = resample_ohlcv(h1.iloc[: i + 1], "W-MON")
+            frames_raw = {"1d": d, "1w": w}
 
-    for i in range(min_history, n):
-        window = df.iloc[:i+1]  # datos hasta la vela i (incluida)
-        bar = df.iloc[i]
-        high, low, close = bar["high"], bar["low"], bar["close"]
-
-        # ── Gestionar trade abierto: chequear si la vela toco SL o TP ──
+        # ── Gestion del trade abierto con la vela i ──
         if open_trade:
-            d = open_trade["direction"]
-            sl = open_trade["stop"]
-            tp = open_trade["tp"]
-            exit_price = None
-            reason = None
-            if d == "LONG":
-                # Conservador: si la vela toco ambos, asumimos que toco el stop primero
-                if low <= sl:
-                    exit_price, reason = sl, "stop"
-                elif high >= tp:
-                    exit_price, reason = tp, "tp"
-            else:  # SHORT
-                if high >= sl:
-                    exit_price, reason = sl, "stop"
-                elif low <= tp:
-                    exit_price, reason = tp, "tp"
-
-            if exit_price:
-                entry = open_trade["entry"]
-                if d == "LONG":
-                    pnl = (exit_price - entry) / entry * 100
-                else:
-                    pnl = (entry - exit_price) / entry * 100
-                pnl_net = pnl - FEE_PCT * 2
-                trades.append({
-                    "direction": d, "entry": entry, "exit": exit_price,
-                    "reason": reason, "pnl_pct": round(pnl, 3),
-                    "pnl_net": round(pnl_net, 3),
-                    "bars_held": i - open_trade["bar"],
-                    "entry_time": str(open_trade["time"]),
-                })
+            hi, lo, cl = float(bar["high"]), float(bar["low"]), float(bar["close"])
+            d_ = open_trade["direction"]
+            exit_price = reason = None
+            if d_ == "LONG":
+                if lo <= open_trade["stop"]:
+                    exit_price, reason = open_trade["stop"], "stop"
+                elif hi >= open_trade["tp"]:
+                    exit_price, reason = open_trade["tp"], "tp"
+            else:
+                if hi >= open_trade["stop"]:
+                    exit_price, reason = open_trade["stop"], "stop"
+                elif lo <= open_trade["tp"]:
+                    exit_price, reason = open_trade["tp"], "tp"
+            if exit_price is None and i - open_trade["bar"] >= MAX_BARS[asset_type]:
+                exit_price, reason = cl, "tiempo"
+            if exit_price is not None:
+                _record(trades, open_trade, exit_price, reason, i)
                 open_trade = None
 
-        # ── Buscar nueva entrada si no hay trade abierto ──
-        if not open_trade:
-            try:
-                sc = calculate_score_fn(window)
-                score = sc["score"]
-                adx = sc.get("adx") or 0
-                threshold = get_adaptive_threshold_fn(adx)
-                # Señal simple por score vs umbral (sin filtros macro multi-tf,
-                # que requieren los otros timeframes no disponibles en un solo df)
-                if score >= threshold:
-                    direction = "LONG"
-                elif score <= -threshold:
-                    direction = "SHORT"
-                else:
-                    direction = None
+        try:
+            frames = prepare_frames(frames_raw)
+            r = analyze_frames(name, frames, asset_type, allow_short, None, 10000, 0.02)
+        except Exception as e:
+            continue
+        if r.get("error"):
+            continue
 
-                if direction:
-                    levels = get_levels_fn(window)
-                    entry = close
-                    if direction == "LONG":
-                        sl, tp = levels.get("stop_long"), levels.get("tp1_long")
-                    else:
-                        sl, tp = levels.get("stop_short"), levels.get("tp1_short")
-                    if sl and tp:
-                        open_trade = {
-                            "direction": direction, "entry": entry,
-                            "stop": sl, "tp": tp, "bar": i,
-                            "time": window.index[-1] if hasattr(window, "index") else i,
-                        }
-            except Exception:
-                continue  # vela con datos incompletos, saltar
+        if open_trade:
+            # salida por senal contraria o agotamiento fuerte
+            d_ = open_trade["direction"]
+            exh = r["exhaustion"]
+            if (r["signal"] in ("LONG", "SHORT") and r["signal"] != d_) or \
+               (exh["score"] >= 60 and exh["direction"] and exh["direction"] != ("ALCISTA" if d_ == "LONG" else "BAJISTA")):
+                _record(trades, open_trade, float(bar["close"]), "senal", i)
+                open_trade = None
 
-    # ── Estadisticas ──
-    n_trades = len(trades)
-    if n_trades == 0:
-        return {"trades": 0, "note": "No se generaron trades en el periodo",
-                "win_rate": None, "total_pnl_net": 0}
+        if not open_trade and r["signal"] in ("LONG", "SHORT") and r.get("plan") and not r["plan"].get("rejected"):
+            signals_seen += 1
+            p = r["plan"]
+            open_trade = {"direction": r["signal"], "entry": float(bar["close"]), "stop": p["stop"], "tp": p["tp1"],
+                          "bar": i, "time": str(bar_time)[:16], "setup": r["setup"], "confidence": r["confidence"],
+                          "regime": r["regime"]}
+        if progress and (i - min_bars) % 200 == 0:
+            print(f"  {i}/{end} velas, {len(trades)} trades, {time.time() - t0:.0f}s")
 
+    if open_trade:
+        _record(trades, open_trade, float(ref_all["close"].iloc[end - 1]), "abierto_al_final", end - 1)
+
+    return _stats(trades, n_bars=end - min_bars, ref_tf=ref_tf, name=name) | {"elapsed_s": round(time.time() - t0, 1)}
+
+
+def _record(trades, ot, exit_price, reason, bar_i):
+    e, d = ot["entry"], ot["direction"]
+    pnl = (exit_price - e) / e * 100 if d == "LONG" else (e - exit_price) / e * 100
+    risk = abs(e - ot["stop"]) / e * 100
+    trades.append({**{k: ot[k] for k in ("direction", "setup", "confidence", "regime", "time")},
+                   "entry": round(e, 4), "exit": round(exit_price, 4), "reason": reason,
+                   "pnl_pct": round(pnl, 3), "pnl_net": round(pnl - 2 * FEE_PCT, 3),
+                   "r": round(pnl / risk, 2) if risk else None, "bars": bar_i - ot["bar"]})
+
+
+def _stats(trades, n_bars, ref_tf, name):
+    n = len(trades)
+    if n == 0:
+        return {"asset": name, "trades": 0, "note": "sin trades en el periodo", "bars": n_bars}
     wins = [t for t in trades if t["pnl_net"] > 0]
     losses = [t for t in trades if t["pnl_net"] <= 0]
-    total_net = sum(t["pnl_net"] for t in trades)
-    longs = [t for t in trades if t["direction"] == "LONG"]
-    shorts = [t for t in trades if t["direction"] == "SHORT"]
+    gw = sum(t["pnl_net"] for t in wins)
+    gl = -sum(t["pnl_net"] for t in losses)
+    eq, peak, mdd = 0.0, 0.0, 0.0
+    for t in trades:
+        eq += t["pnl_net"]; peak = max(peak, eq); mdd = min(mdd, eq - peak)
+
+    def grp(key):
+        out = {}
+        for v in sorted({t[key] for t in trades if t[key]}):
+            sub = [t for t in trades if t[key] == v]
+            out[v] = {"n": len(sub), "win_rate": round(sum(1 for t in sub if t["pnl_net"] > 0) / len(sub) * 100, 1),
+                      "pnl_net": round(sum(t["pnl_net"] for t in sub), 2),
+                      "avg_r": round(sum(t["r"] or 0 for t in sub) / len(sub), 2)}
+        return out
 
     return {
-        "trades": n_trades,
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": round(len(wins) / n_trades * 100, 1),
-        "total_pnl_net_pct": round(total_net, 2),
-        "avg_win_pct": round(sum(t["pnl_net"] for t in wins) / len(wins), 2) if wins else None,
-        "avg_loss_pct": round(sum(t["pnl_net"] for t in losses) / len(losses), 2) if losses else None,
-        "longs": len(longs), "shorts": len(shorts),
-        "long_win_rate": round(sum(1 for t in longs if t["pnl_net"]>0)/len(longs)*100,1) if longs else None,
-        "short_win_rate": round(sum(1 for t in shorts if t["pnl_net"]>0)/len(shorts)*100,1) if shorts else None,
-        "avg_bars_held": round(sum(t["bars_held"] for t in trades)/n_trades,1),
-        "trade_list": trades[-30:],
-        "warning": "Backtest sobre datos pasados. NO es prediccion ni garantia. "
-                   "Sin slippage real. Usar como referencia, no como certeza.",
+        "asset": name, "ref_tf": ref_tf, "bars": n_bars, "trades": n,
+        "wins": len(wins), "losses": len(losses), "win_rate": round(len(wins) / n * 100, 1),
+        "total_pnl_net_pct": round(sum(t["pnl_net"] for t in trades), 2),
+        "avg_win_pct": round(gw / len(wins), 2) if wins else None,
+        "avg_loss_pct": round(-gl / len(losses), 2) if losses else None,
+        "profit_factor": round(gw / gl, 2) if gl > 0 else None,
+        "avg_r": round(sum(t["r"] or 0 for t in trades) / n, 2),
+        "expectancy_pct": round(sum(t["pnl_net"] for t in trades) / n, 3),
+        "max_drawdown_pct": round(mdd, 2),
+        "avg_bars_held": round(sum(t["bars"] for t in trades) / n, 1),
+        "by_direction": grp("direction"), "by_setup": grp("setup"), "by_confidence": grp("confidence"),
+        "by_reason": {r: sum(1 for t in trades if t["reason"] == r) for r in {t["reason"] for t in trades}},
+        "trade_list": trades[-40:],
+        "warning": "Backtest sobre el pasado, sin slippage. Referencia, no garantia.",
     }
+
+
+def run_backtest_asset(asset: str, source: str = "yahoo", **kw) -> dict:
+    from data import fetch_crypto_history_yahoo, fetch_kraken, CRYPTO_SYMBOLS, synthetic_ohlcv
+    if source == "synthetic":
+        h1 = synthetic_ohlcv(24 * 400, "1h", 60000, seed=1, regime="mixed")
+    elif source == "kraken":
+        h1 = fetch_kraken(CRYPTO_SYMBOLS[asset], "1h", 720)
+        kw.setdefault("min_bars", 60)
+    else:
+        h1 = fetch_crypto_history_yahoo(asset)["1h"]
+    res = run_backtest(h1, "crypto", asset, **kw)
+    res["source"] = source
+    return res
+
+
+if __name__ == "__main__":
+    import sys, json
+    asset = sys.argv[1] if len(sys.argv) > 1 else "BTC"
+    source = sys.argv[2] if len(sys.argv) > 2 else "yahoo"
+    print(f"Backtest {asset} ({source})...")
+    r = run_backtest_asset(asset, source, progress=True)
+    r.pop("trade_list", None)
+    print(json.dumps(r, indent=2, ensure_ascii=False))

@@ -1,31 +1,38 @@
 """
-Sistema de tracking de señales y cálculo de acertividad.
-Base de datos SQLite — sin dependencias externas.
+Registro de senales y medicion de acertividad.
+
+Cada senal guarda el contexto completo (setup, regimen, sesgo, niveles, plan)
+y se evalua a 3 horizontes usando la VELA HISTORICA correspondiente (no el
+precio del momento en que corre el chequeo):
+    cripto:   4h / 24h / 72h
+    acciones: 1d / 5d / 20d  (en horas: 24 / 120 / 480)
+
+WIN = el precio se movio a favor mas que win_threshold_pct (config, default 0.3 %).
 """
 
 import sqlite3
 import json
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
 
 DB_PATH = Path(__file__).parent / "data" / "signals.db"
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
-
-def _load_win_threshold() -> float:
-    """Lee umbral minimo de WIN desde config.json."""
-    if CONFIG_PATH.exists():
-        try:
-            with open(CONFIG_PATH) as f:
-                return float(json.load(f).get("win_threshold_pct", 0.3))
-        except Exception:
-            pass
-    return 0.3
+HORIZONS = {"crypto": [4, 24, 72], "stock": [24, 120, 480]}
 
 
-# Umbral minimo para considerar una operacion como WIN.
-# Por debajo de esto el movimiento esta dentro de fees + slippage tipico (~0.3%).
-WIN_THRESHOLD_PCT = _load_win_threshold()
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _win_threshold() -> float:
+    try:
+        with open(CONFIG_PATH) as f:
+            return float(json.load(f).get("win_threshold_pct", 0.3))
+    except Exception:
+        return 0.3
 
 
 def get_conn():
@@ -36,348 +43,194 @@ def get_conn():
 
 
 def init_db():
-    """Crea las tablas si no existen."""
     conn = get_conn()
     conn.executescript("""
-        CREATE TABLE IF NOT EXISTS signals (
+        CREATE TABLE IF NOT EXISTS signals_v4 (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             asset       TEXT NOT NULL,
+            asset_type  TEXT NOT NULL DEFAULT 'crypto',
             signal      TEXT NOT NULL,
-            score       INTEGER,
-            price_entry REAL NOT NULL,
-            trend_1d    TEXT,
-            rsi6        REAL,
-            rsi20       REAL,
-            macd_hist   REAL,
-            conditions  TEXT,
+            setup       TEXT,
             confidence  TEXT,
             regime      TEXT,
-            adx         REAL,
-            threshold_used INTEGER,
-            created_at  TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS outcomes (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            signal_id   INTEGER NOT NULL,
-            asset       TEXT NOT NULL,
+            bias        INTEGER,
+            position    TEXT,
             price_entry REAL NOT NULL,
-            price_4h    REAL,
-            price_24h   REAL,
-            price_72h   REAL,
-            pct_4h      REAL,
-            pct_24h     REAL,
-            pct_72h     REAL,
-            win_4h      INTEGER,
-            win_24h     INTEGER,
-            win_72h     INTEGER,
-            checked_at  TEXT,
-            FOREIGN KEY (signal_id) REFERENCES signals(id)
+            stop        REAL,
+            tp1         REAL,
+            rr_tp1      REAL,
+            context     TEXT,
+            created_at  TEXT NOT NULL,
+            h1_hours    INTEGER, h2_hours INTEGER, h3_hours INTEGER,
+            price_h1 REAL, price_h2 REAL, price_h3 REAL,
+            pct_h1 REAL, pct_h2 REAL, pct_h3 REAL,
+            win_h1 INTEGER, win_h2 INTEGER, win_h3 INTEGER,
+            checked_at  TEXT
         );
+        CREATE INDEX IF NOT EXISTS idx_sig4_asset ON signals_v4(asset);
+        CREATE INDEX IF NOT EXISTS idx_sig4_created ON signals_v4(created_at);
     """)
-
-    # Migracion idempotente: agregar columnas nuevas si la DB es vieja
-    existing = [r[1] for r in conn.execute("PRAGMA table_info(signals)")]
-    for col, coltype in [("confidence", "TEXT"), ("regime", "TEXT"),
-                          ("adx", "REAL"), ("threshold_used", "INTEGER")]:
-        if col not in existing:
-            conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {coltype}")
-
     conn.commit()
     conn.close()
 
 
-# ── Guardar señal ────────────────────────────────────────────────────────────
-
-def save_signal(result: dict) -> int:
-    """
-    Guarda una señal nueva en la DB.
-    Devuelve el ID de la señal guardada.
-    """
+def save_signal(r: dict) -> int:
+    hz = HORIZONS.get(r.get("asset_type", "crypto"), HORIZONS["crypto"])
+    plan = r.get("plan") or {}
+    ctx = {
+        "reasons": r.get("reasons"), "warnings": r.get("warnings"), "action": r.get("action"),
+        "trends": {k: v["label"] for k, v in r.get("trends", {}).items()},
+        "nearest_support": (r["levels"].get("nearest_support") or {}).get("price"),
+        "nearest_resistance": (r["levels"].get("nearest_resistance") or {}).get("price"),
+        "exhaustion": r.get("exhaustion", {}).get("score"),
+        "funding": (r.get("funding") or {}).get("rate"),
+    }
     conn = get_conn()
     cur = conn.execute("""
-        INSERT INTO signals
-            (asset, signal, score, price_entry, trend_1d, rsi6, rsi20, macd_hist,
-             conditions, confidence, regime, adx, threshold_used, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        result["name"],
-        result["signal"],
-        result["score"],
-        result["price"],
-        result.get("trend_1d", ""),
-        result.get("rsi6"),
-        result.get("rsi20"),
-        result.get("macd_hist"),
-        json.dumps(result.get("conditions", {})),
-        result.get("confidence", ""),
-        result.get("regime", ""),
-        result.get("adx"),
-        result.get("threshold_used"),
-        datetime.utcnow().isoformat(),
-    ))
-
-    signal_id = cur.lastrowid
-
-    # Crear fila de outcome vacía para completar después
-    conn.execute("""
-        INSERT INTO outcomes (signal_id, asset, price_entry, checked_at)
-        VALUES (?, ?, ?, ?)
-    """, (signal_id, result["name"], result["price"], None))
-
+        INSERT INTO signals_v4 (asset, asset_type, signal, setup, confidence, regime, bias, position,
+            price_entry, stop, tp1, rr_tp1, context, created_at, h1_hours, h2_hours, h3_hours)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (r.get("ticker") or r["name"], r.get("asset_type", "crypto"), r["signal"], r.get("setup"),
+          r.get("confidence"), r.get("regime"), r.get("bias"), r.get("position"),
+          r["price"], plan.get("stop"), plan.get("tp1"), plan.get("rr_tp1"),
+          json.dumps(ctx, default=str), _utcnow().isoformat(), hz[0], hz[1], hz[2]))
+    sid = cur.lastrowid
     conn.commit()
     conn.close()
-    return signal_id
+    return sid
 
 
-# ── Actualizar outcomes ──────────────────────────────────────────────────────
-
-def _is_win(pct: float, signal_dir: str) -> int:
-    """
-    Determina si una señal fue WIN o LOSS aplicando umbral minimo.
-    Un movimiento < 0.3% se considera dentro de ruido (fees + slippage).
-    """
-    if signal_dir == "LONG":
-        return 1 if pct > WIN_THRESHOLD_PCT else 0
-    elif signal_dir == "SHORT":
-        return 1 if pct < -WIN_THRESHOLD_PCT else 0
+def _is_win(pct: float, signal: str, thr: float) -> int:
+    if signal == "LONG":
+        return int(pct > thr)
+    if signal == "SHORT":
+        return int(pct < -thr)
     return 0
 
 
-def update_outcomes(asset: str, current_price: float):
+def _price_at(df: pd.DataFrame, when: datetime) -> float | None:
+    """Cierre de la primera vela cuyo tiempo de apertura es >= when."""
+    if df is None or len(df) == 0:
+        return None
+    idx = df.index.searchsorted(when)
+    if idx >= len(df):
+        return None
+    return float(df["close"].iloc[idx])
+
+
+def update_outcomes(asset: str, df: pd.DataFrame):
     """
-    Para cada señal pendiente de ese asset, verifica si pasaron 4H/24H/72H
-    y calcula el resultado (win/loss) aplicando umbral minimo de fees.
+    df: velas (1h para cripto, 1d para acciones) con indice datetime.
+    Completa los horizontes vencidos usando la vela historica exacta.
     """
+    thr = _win_threshold()
     conn = get_conn()
-
-    # Traer señales sin outcome completo
     pending = conn.execute("""
-        SELECT s.id, s.signal, s.price_entry, s.created_at,
-               o.price_4h, o.price_24h, o.price_72h
-        FROM signals s
-        JOIN outcomes o ON o.signal_id = s.id
-        WHERE s.asset = ?
-          AND (o.price_72h IS NULL)
-        ORDER BY s.created_at DESC
-        LIMIT 50
+        SELECT * FROM signals_v4 WHERE asset = ? AND price_h3 IS NULL
+        ORDER BY created_at DESC LIMIT 100
     """, (asset,)).fetchall()
-
-    now = datetime.utcnow()
-
+    now = _utcnow()
     for row in pending:
         created = datetime.fromisoformat(row["created_at"])
-        elapsed = now - created
-        signal_dir = "LONG" if "LONG" in row["signal"] else "SHORT" if "SHORT" in row["signal"] else None
-
-        if not signal_dir:
-            continue
-
         updates = {}
-
-        # 4H — después de 4 horas
-        if elapsed >= timedelta(hours=4) and row["price_4h"] is None:
-            pct = ((current_price - row["price_entry"]) / row["price_entry"]) * 100
-            updates["price_4h"] = current_price
-            updates["pct_4h"] = round(pct, 3)
-            updates["win_4h"] = _is_win(pct, signal_dir)
-
-        # 24H
-        if elapsed >= timedelta(hours=24) and row["price_24h"] is None:
-            pct = ((current_price - row["price_entry"]) / row["price_entry"]) * 100
-            updates["price_24h"] = current_price
-            updates["pct_24h"] = round(pct, 3)
-            updates["win_24h"] = _is_win(pct, signal_dir)
-
-        # 72H
-        if elapsed >= timedelta(hours=72) and row["price_72h"] is None:
-            pct = ((current_price - row["price_entry"]) / row["price_entry"]) * 100
-            updates["price_72h"] = current_price
-            updates["pct_72h"] = round(pct, 3)
-            updates["win_72h"] = _is_win(pct, signal_dir)
-
+        for h in (1, 2, 3):
+            hours = row[f"h{h}_hours"]
+            if row[f"price_h{h}"] is not None or hours is None:
+                continue
+            target = created + timedelta(hours=hours)
+            if now < target:
+                continue
+            p = _price_at(df, target)
+            if p is None:
+                continue
+            pct = (p - row["price_entry"]) / row["price_entry"] * 100
+            updates[f"price_h{h}"] = p
+            updates[f"pct_h{h}"] = round(pct, 3)
+            updates[f"win_h{h}"] = _is_win(pct, row["signal"], thr)
         if updates:
             updates["checked_at"] = now.isoformat()
             set_clause = ", ".join(f"{k} = ?" for k in updates)
-            vals = list(updates.values()) + [row["id"], asset]
-            conn.execute(f"""
-                UPDATE outcomes SET {set_clause}
-                WHERE signal_id = ? AND asset = ?
-            """, vals)
-
+            conn.execute(f"UPDATE signals_v4 SET {set_clause} WHERE id = ?",
+                         list(updates.values()) + [row["id"]])
     conn.commit()
     conn.close()
 
 
-# ── Estadísticas ─────────────────────────────────────────────────────────────
-
-def get_stats() -> list:
-    """
-    Calcula estadísticas de acertividad por activo.
-    """
-    conn = get_conn()
-
-    assets = conn.execute("SELECT DISTINCT asset FROM signals").fetchall()
-    stats = []
-
-    for row in assets:
-        asset = row["asset"]
-
-        total = conn.execute(
-            "SELECT COUNT(*) as n FROM signals WHERE asset = ?", (asset,)
-        ).fetchone()["n"]
-
-        def win_rate(col):
-            r = conn.execute(f"""
-                SELECT
-                    COUNT(*) as total,
-                    SUM({col}) as wins,
-                    AVG(ABS(pct_{col.replace('win_','')})) as avg_pct
-                FROM outcomes
-                WHERE asset = ? AND {col} IS NOT NULL
-            """, (asset,)).fetchone()
-            if not r or not r["total"]:
-                return None
-            return {
-                "total": r["total"],
-                "wins": r["wins"] or 0,
-                "rate": round((r["wins"] or 0) / r["total"] * 100, 1),
-                "avg_pct": round(r["avg_pct"] or 0, 2),
-            }
-
-        # Últimas 10 señales
-        recent = conn.execute("""
-            SELECT s.signal, s.price_entry, s.created_at, s.score,
-                   o.win_4h, o.win_24h, o.win_72h,
-                   o.pct_4h, o.pct_24h, o.pct_72h
-            FROM signals s
-            LEFT JOIN outcomes o ON o.signal_id = s.id
-            WHERE s.asset = ?
-            ORDER BY s.created_at DESC
-            LIMIT 10
-        """, (asset,)).fetchall()
-
-        stats.append({
-            "asset": asset,
-            "total_signals": total,
-            "win_4h":  win_rate("win_4h"),
-            "win_24h": win_rate("win_24h"),
-            "win_72h": win_rate("win_72h"),
-            "recent": [dict(r) for r in recent],
-        })
-
-    conn.close()
-    return stats
-
-
-def get_all_signals(limit: int = 100) -> list:
-    """Trae las últimas N señales con sus outcomes."""
-    conn = get_conn()
-    rows = conn.execute("""
-        SELECT s.id, s.asset, s.signal, s.score, s.price_entry,
-               s.trend_1d, s.rsi6, s.rsi20, s.created_at,
-               o.price_4h, o.price_24h, o.price_72h,
-               o.pct_4h, o.pct_24h, o.pct_72h,
-               o.win_4h, o.win_24h, o.win_72h
-        FROM signals s
-        LEFT JOIN outcomes o ON o.signal_id = s.id
-        ORDER BY s.created_at DESC
-        LIMIT ?
-    """, (limit,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def get_evolution_report() -> dict:
-    """
-    Reporte completo de evolucion del bot, pensado para analisis.
-    Agrupa acertividad por tipo de señal, confianza y regimen.
-    Devuelve un dict resumido y facil de leer.
-    """
-    conn = get_conn()
-
-    def rate_for(where_clause: str, params: tuple, horizon: str) -> dict:
-        """Win rate para un subconjunto de señales en un horizonte dado."""
-        q = f"""
-            SELECT COUNT(*) as total,
-                   SUM(o.win_{horizon}) as wins,
-                   AVG(o.pct_{horizon}) as avg_pct
-            FROM signals s
-            JOIN outcomes o ON o.signal_id = s.id
-            WHERE o.win_{horizon} IS NOT NULL AND {where_clause}
-        """
-        r = conn.execute(q, params).fetchone()
-        if not r or not r["total"]:
-            return None
-        return {
-            "total": r["total"],
-            "wins": r["wins"] or 0,
+def _rate(conn, where: str, params: tuple, h: int):
+    r = conn.execute(f"""
+        SELECT COUNT(*) total, SUM(win_h{h}) wins, AVG(pct_h{h}) avg_pct,
+               AVG(CASE WHEN signal='LONG' THEN pct_h{h} ELSE -pct_h{h} END) avg_fav
+        FROM signals_v4 WHERE win_h{h} IS NOT NULL AND {where}
+    """, params).fetchone()
+    if not r or not r["total"]:
+        return None
+    return {"total": r["total"], "wins": r["wins"] or 0,
             "rate": round((r["wins"] or 0) / r["total"] * 100, 1),
-            "avg_pct": round(r["avg_pct"] or 0, 2),
-        }
+            "avg_move_favor": round(r["avg_fav"] or 0, 2)}
 
-    # Resumen global
-    total_signals = conn.execute("SELECT COUNT(*) as n FROM signals").fetchone()["n"]
-    pending = conn.execute(
-        "SELECT COUNT(*) as n FROM outcomes WHERE win_72h IS NULL"
-    ).fetchone()["n"]
 
-    # Fecha de la primera y ultima señal (para saber cuanto tiempo lleva midiendo)
-    span = conn.execute(
-        "SELECT MIN(created_at) as first, MAX(created_at) as last FROM signals"
-    ).fetchone()
-
-    report = {
-        "total_signals": total_signals,
-        "pending_outcomes": pending,
-        "evaluated": total_signals - pending,
-        "first_signal": span["first"],
-        "last_signal": span["last"],
-        "generated_at": datetime.utcnow().isoformat(),
-        "by_signal_type": {},
-        "by_confidence": {},
-        "by_regime": {},
-        "by_asset": {},
-        "global_72h": rate_for("1=1", (), "72h"),
-    }
-
-    # Por tipo de señal (LONG / SHORT)
-    for sig in ["LONG", "SHORT"]:
-        row = {h: rate_for("s.signal LIKE ?", (f"%{sig}%",), h)
-               for h in ["4h", "24h", "72h"]}
-        if any(row.values()):
-            report["by_signal_type"][sig] = row
-
-    # Por confianza (ALTA / MEDIA / BAJA)
-    for conf in ["ALTA", "MEDIA", "BAJA"]:
-        row = {h: rate_for("s.confidence = ?", (conf,), h)
-               for h in ["4h", "24h", "72h"]}
-        if any(row.values()):
-            report["by_confidence"][conf] = row
-
-    # Por regimen (agrupado por direccion)
-    regime_groups = {
-        "BULL": "s.regime LIKE '%BULL%'",
-        "BEAR": "s.regime LIKE '%BEAR%'",
-        "NEUTRO": "(s.regime LIKE '%LATERAL%' OR s.regime LIKE '%TRANSICI%')",
-    }
-    for label, clause in regime_groups.items():
-        row = {h: rate_for(clause, (), h) for h in ["4h", "24h", "72h"]}
-        if any(row.values()):
-            report["by_regime"][label] = row
-
-    # Por activo
-    assets = conn.execute("SELECT DISTINCT asset FROM signals").fetchall()
+def get_stats(asset_type: str = "crypto") -> list:
+    conn = get_conn()
+    hz = HORIZONS[asset_type]
+    assets = conn.execute("SELECT DISTINCT asset FROM signals_v4 WHERE asset_type = ?", (asset_type,)).fetchall()
+    out = []
     for a in assets:
         asset = a["asset"]
-        row = {h: rate_for("s.asset = ?", (asset,), h)
-               for h in ["4h", "24h", "72h"]}
-        if any(row.values()):
-            report["by_asset"][asset] = row
-
+        total = conn.execute("SELECT COUNT(*) n FROM signals_v4 WHERE asset = ?", (asset,)).fetchone()["n"]
+        recent = conn.execute("""
+            SELECT id, signal, setup, confidence, price_entry, created_at, pct_h1, pct_h2, pct_h3,
+                   win_h1, win_h2, win_h3 FROM signals_v4 WHERE asset = ? ORDER BY created_at DESC LIMIT 10
+        """, (asset,)).fetchall()
+        out.append({"asset": asset, "total_signals": total,
+                    "horizons": [f"{h}h" if h < 48 else f"{h // 24}d" for h in hz],
+                    "h1": _rate(conn, "asset = ?", (asset,), 1),
+                    "h2": _rate(conn, "asset = ?", (asset,), 2),
+                    "h3": _rate(conn, "asset = ?", (asset,), 3),
+                    "recent": [dict(r) for r in recent]})
     conn.close()
-    return report
+    return out
 
 
-# Inicializar DB al importar
+def get_all_signals(limit: int = 100, asset_type: str | None = None) -> list:
+    conn = get_conn()
+    q = "SELECT * FROM signals_v4"
+    params = ()
+    if asset_type:
+        q += " WHERE asset_type = ?"
+        params = (asset_type,)
+    rows = conn.execute(q + " ORDER BY created_at DESC LIMIT ?", params + (limit,)).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["context"] = json.loads(d["context"]) if d["context"] else {}
+        except Exception:
+            pass
+        out.append(d)
+    return out
+
+
+def get_evolution_report(asset_type: str = "crypto") -> dict:
+    conn = get_conn()
+    base = "asset_type = ?"
+    rep = {"asset_type": asset_type, "horizons": HORIZONS[asset_type],
+           "total_signals": conn.execute(f"SELECT COUNT(*) n FROM signals_v4 WHERE {base}", (asset_type,)).fetchone()["n"],
+           "global": {f"h{h}": _rate(conn, base, (asset_type,), h) for h in (1, 2, 3)},
+           "by_signal": {}, "by_setup": {}, "by_confidence": {}, "by_regime": {}, "by_asset": {}}
+    for s in ("LONG", "SHORT"):
+        rep["by_signal"][s] = {f"h{h}": _rate(conn, base + " AND signal = ?", (asset_type, s), h) for h in (1, 2, 3)}
+    for s in ("PULLBACK", "BREAKOUT"):
+        rep["by_setup"][s] = {f"h{h}": _rate(conn, base + " AND setup = ?", (asset_type, s), h) for h in (1, 2, 3)}
+    for c in ("ALTA", "MEDIA", "BAJA"):
+        rep["by_confidence"][c] = {f"h{h}": _rate(conn, base + " AND confidence = ?", (asset_type, c), h) for h in (1, 2, 3)}
+    for lab, clause in (("BULL", "regime LIKE '%BULL%'"), ("BEAR", "regime LIKE '%BEAR%'"),
+                        ("NEUTRO", "(regime LIKE '%LATERAL%' OR regime LIKE '%TRANSICION%')")):
+        rep["by_regime"][lab] = {f"h{h}": _rate(conn, base + " AND " + clause, (asset_type,), h) for h in (1, 2, 3)}
+    for a in conn.execute(f"SELECT DISTINCT asset FROM signals_v4 WHERE {base}", (asset_type,)).fetchall():
+        rep["by_asset"][a["asset"]] = {f"h{h}": _rate(conn, base + " AND asset = ?", (asset_type, a["asset"]), h) for h in (1, 2, 3)}
+    conn.close()
+    return rep
+
+
 init_db()

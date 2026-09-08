@@ -1,9 +1,17 @@
 {
   "telegram_token": "TU_TOKEN_DE_BOTFATHER",
   "telegram_chat_id": "TU_CHAT_ID",
+  "dashboard_token": "elegi-una-clave-larga",
+  "host": "127.0.0.1",
+  "port": 5000,
   "capital_disponible": 10000,
-  "risk_pct": 0.025,
+  "risk_pct": 0.02,
+  "default_leverage": 3,
+  "crypto_assets": ["BTC", "ETH", "SOL", "XRP", "LINK"],
   "full_analysis_interval_hours": 4,
   "ops_check_interval_minutes": 2,
+  "stocks_enabled": true,
+  "stocks_hours_utc": [15, 21],
+  "stocks_telegram_digest": true,
   "win_threshold_pct": 0.3
 }

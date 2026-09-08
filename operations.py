@@ -7,7 +7,11 @@ Solo perpetuos con apalancamiento.
 import sqlite3
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 DB_PATH = Path(__file__).parent / "data" / "operations.db"
 
@@ -205,7 +209,7 @@ def create_operation(data: dict) -> dict:
         data.get("tp3"),
         liquidation,
         data.get("notes", ""),
-        datetime.utcnow().isoformat(),
+        _utcnow().isoformat(),
         data.get("bot_signal", ""),
         data.get("bot_score", 0),
         data.get("bot_confidence", ""),
@@ -318,7 +322,7 @@ def close_operation(op_id: int, exit_price: float, reason: str = "manual") -> di
             closed_at = ?
         WHERE id = ?
     """, (exit_price, reason, pnl["pnl_usd"], pnl["pnl_pct"],
-          datetime.utcnow().isoformat(), op_id))
+          _utcnow().isoformat(), op_id))
     conn.commit()
     conn.close()
     return {"ok": True, "pnl": pnl}
@@ -369,7 +373,7 @@ def enrich_open_with_market(operations: list, market_data: list) -> list:
 
         # Tiempo en operacion
         opened    = datetime.fromisoformat(op["opened_at"])
-        elapsed   = datetime.utcnow() - opened
+        elapsed   = _utcnow() - opened
         hours     = elapsed.total_seconds() / 3600
         time_str  = f"{int(hours)}h {int((hours % 1) * 60)}m" if hours < 24 else f"{int(hours / 24)}d {int(hours % 24)}h"
 
@@ -387,20 +391,33 @@ def enrich_open_with_market(operations: list, market_data: list) -> list:
             stop_hit    = op["stop_loss"] and current >= op["stop_loss"]
             stop_close  = op["stop_loss"] and dist_stop and abs(dist_stop) < 1.5
 
-        # Alertas de cierre alineadas con la posicion
+        # Alertas de cierre (motor v4): agotamiento en contra, cambio de
+        # caracter en contra, senal contraria, precio en nivel contrario
         close_signal = None
-        if op["direction"] == "LONG":
-            cl = m.get("close_long", {})
-            if cl.get("should_close"):
-                close_signal = cl
-        else:
-            cs = m.get("close_short", {})
-            if cs.get("should_close"):
-                close_signal = cs
+        reasons = []
+        exh = m.get("exhaustion") or {}
+        ref_tf = m.get("ref_tf", "4h")
+        struct = (m.get("trends") or {}).get(ref_tf, {}) if m.get("trends") else {}
+        want = "ALCISTA" if op["direction"] == "LONG" else "BAJISTA"
+        if exh.get("reversing") and exh.get("direction") and exh["direction"] != want:
+            reasons.append(f"Agotamiento {exh.get('score')}/100 en contra")
+        if struct.get("choch") and struct["choch"] != want:
+            reasons.append(f"Cambio de caracter {struct['choch'].lower()} en {ref_tf.upper()}")
+        current_signal = m.get("signal", "NEUTRAL")
+        if (op["direction"] == "LONG" and current_signal == "SHORT") or \
+           (op["direction"] == "SHORT" and current_signal == "LONG"):
+            reasons.append("El bot emitio senal contraria")
+        pos = m.get("position", "")
+        if op["direction"] == "LONG" and pos == "EN RESISTENCIA":
+            reasons.append("Precio contra resistencia: zona de toma de ganancia")
+        if op["direction"] == "SHORT" and pos == "EN SOPORTE":
+            reasons.append("Precio en soporte: zona de cobertura")
+        if reasons:
+            urgency = "ALTA" if len(reasons) >= 2 else "MEDIA"
+            close_signal = {"should_close": True, "urgency": urgency, "reasons": reasons}
 
         # Cambio de signal del bot
         bot_changed_against = False
-        current_signal = m.get("signal", "NEUTRAL")
         if op["direction"] == "LONG" and "SHORT" in current_signal:
             bot_changed_against = True
         elif op["direction"] == "SHORT" and "LONG" in current_signal:
@@ -436,7 +453,8 @@ def enrich_open_with_market(operations: list, market_data: list) -> list:
             "elapsed_hours": round(hours, 1),
             "close_signal": close_signal,
             "bot_current_signal": current_signal,
-            "bot_current_score": m.get("score", 0),
+            "bot_current_score": m.get("bias", 0),
+            "bot_action": m.get("action", "—"),
             "bot_current_confidence": m.get("confidence", "—"),
             "bot_changed_against": bot_changed_against,
             "rr_realized": rr_realized,

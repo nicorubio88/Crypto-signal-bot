@@ -1,345 +1,185 @@
-# Crypto Signal Bot v3.1
+# Signal Bot v4 — Cripto + Acciones/CEDEARs
 
-Sistema de señales automatizado para crypto perpetuos (BTC, ETH, SOL, XRP).
-Motor de análisis técnico multi-timeframe con detección de régimen del mercado,
-funding rate de perpetuos (multi-fuente), filtro de correlación BTC, lectura en
-lenguaje claro, escenarios condicionales y gestión integrada de operaciones.
+Sistema de análisis para **tomar decisiones**: comprar, vender, hacer trading o simplemente
+entender cómo está un activo. Reemplaza al motor v3 (score de 17 indicadores) por un motor
+basado en **estructura de mercado** y **soportes/resistencias reales**.
 
-## Stack
-- **Python 3.11+**
-- **Kraken API pública** (sin autenticación, datos OHLC)
-- **Funding rate multi-fuente**: Binance → Bybit → OKX (cascada con fallback)
-- **pandas + pandas-ta** (indicadores técnicos)
-- **Flask** (dashboard web)
-- **APScheduler** (análisis cada 4h, alertas cada 2min)
-- **Telegram Bot API** (notificaciones push)
-- **SQLite** (tracking de acertividad + gestión de operaciones)
+- Cripto (BTC, ETH, SOL, XRP, LINK): Kraken, marco principal 4H, long y short.
+- Acciones, ETFs y CEDEARs: Yahoo Finance, marco principal 1D, solo long. El análisis se hace
+  sobre el subyacente en USD (datos limpios) y al lado se muestra el precio del CEDEAR en pesos y
+  el CCL implícito.
+- Dashboard con gráfico (velas, EMAs, niveles dibujados con su fuerza), pestaña de acciones con
+  watchlist editable, operaciones manuales, acertividad, paper trading y backtest.
+- Alertas Telegram: señal nueva, cambio de lectura (ej. MANTENER → PROTEGER GANANCIAS), llegada a
+  nivel fuerte, stops/TPs de tus operaciones, resumen diario de acciones.
 
----
-
-## Características v3.1
-
-### Nuevo en v3.1
-- **Resumen en lenguaje claro**: cada activo y el mercado global traducidos a 2-3 frases interpretables (no es predicción, traduce los indicadores)
-- **Escenarios y lectura multi-timeframe**: panel plegable con jerarquía de capas (fondo 1W manda, timing 1H da entrada) + escenarios condicionales sobre niveles reales + qué timeframe vigilar
-- **Funding rate multi-fuente**: cascada Binance → Bybit → OKX para resistir bloqueos regionales
-- **Alerta de cambio de régimen**: avisa por Telegram cuando un activo cambia de dirección de régimen (con o sin posición abierta), incluyendo aviso de cierre si corresponde
-- **Endpoint `/api/evolution`**: reporte completo de acertividad por tipo de señal, confianza, régimen y activo (para análisis de evolución)
-- **Tracking ampliado**: cada señal guarda confianza, régimen, ADX y umbral usado
-
-### Heredado de v3.0
-- **Régimen del mercado**: clasificación independiente de la señal (BULL FUERTE / BULL / BULL DÉBIL / LATERAL / BEAR DÉBIL / BEAR / BEAR FUERTE / TRANSICIÓN)
-- **Umbral adaptativo**: el umbral de señal cambia según fuerza de tendencia (ADX)
-- **Filtro de correlación BTC**: bloquea señales de altcoins contrarias a BTC
-
-### Motor de análisis
-- **17 indicadores técnicos**: EMA(20/50/200), Bollinger Bands, MACD, RSI(6/20), StochRSI, ADX, OBV, ATR, VWAP diario, Pivots dinámicos, Funding Rate
-- **Detección de divergencias**: RSI y OBV (acumulación/distribución institucional)
-- **Sistema de scoring ponderado**: ±17 puntos, umbral adaptativo según ADX
-- **Análisis multi-timeframe**: 1W → 1D → 4H → 1H con confirmación
-- **Filtros anti-trampa**: ADX obligatorio, EMA200 para evitar bear/bull rallies
-
-### Endpoints API
-- `/api/data` — análisis actual de los 4 activos + resumen global
-- `/api/stats` — win rate por activo y timeframe
-- `/api/evolution` — reporte completo de evolución (acertividad por señal/confianza/régimen)
-- `/api/signals` — historial de señales
-- `/api/operations/*` — gestión de operaciones
-
-### Dashboard interactivo
-4 pestañas:
-1. **Señales en vivo**: cards con régimen, funding, score, tendencias, indicadores, niveles S/R dinámicos
-2. **Mis operaciones**: CRUD completo, tracking PnL en tiempo real, alertas contextuales
-3. **Acertividad**: win rate por timeframe (4H/24H/72H) con threshold realista (0.3%)
-4. **Historial**: todas las señales emitidas con outcomes
-
-### Gestión de operaciones
-- Soporte **USDT-M** (tamaño en USD) y **COIN-M** (tamaño en crypto)
-- Calculadora automática de tamaño (capital × 2.5% riesgo)
-- Niveles sugeridos por ATR (SL + 3 TPs con split 40/40/20)
-- Alertas Telegram en tiempo real (< 2 min):
-  - Stop cercano (< 1.5% distancia)
-  - TP1/TP2/TP3 alcanzado
-  - Bot cambió contra tu posición
-  - Señal de cierre urgente
-
-### Notificaciones Telegram
-Mensaje completo con régimen del mercado, tendencias multi-timeframe, ADX, RSI, MACD, OBV, divergencias, funding rate y niveles operativos completos.
+> Es una herramienta de análisis, no ejecuta órdenes. Toda decisión es tuya.
 
 ---
 
-## Sistema de scoring v3.0
+## Cómo decide el motor (engine.py)
 
-### Capas ponderadas (max ±17 puntos)
-| Capa | Peso | Indicadores |
-|------|------|-------------|
-| Tendencia | ±3 | EMA 20/50/200 alineadas |
-| Bandas + VWAP | ±2 | Bollinger MB + VWAP diario |
-| Momentum | ±3 | MACD + StochRSI |
-| Fuerza relativa | ±1 | RSI(20) |
-| Divergencias RSI | ±3 | Precio vs RSI (mínimos/máximos) |
-| Volumen | ±3 | OBV vs MA20 + divergencia OBV (peso reducido si ADX > 40) |
-| Presión compradora | +1 | Volumen > 1.5× MA10 (solo suma) |
-| Funding rate | ±1 | Sentimiento perpetuos (opcional, si Binance disponible) |
-
-### Umbral adaptativo según ADX
-
-```
-ADX > 40 (tendencia muy fuerte)  → umbral 7  (no perder el move)
-ADX 30-40 (tendencia clara)      → umbral 9  (base)
-ADX 20-30 (tendencia débil)      → umbral 10 (más estricto)
-ADX < 20 (lateral)               → umbral 12 (muy estricto)
-```
-
-### Filtros obligatorios
-- **ADX ≥ 25**: mercado debe tener tendencia definida
-- **1W alineado**: no operar contra tendencia semanal
-- **1D confirmado**: tendencia diaria debe apoyar
-- **1H confirmado**: trigger de entrada en 1 hora
-
-### Filtro de correlación BTC
-- BTC en SHORT (ALTA/MEDIA) → bloquea LONGs en altcoins
-- BTC en LONG (ALTA/MEDIA) → bloquea SHORTs en altcoins
-- BTC en BEAR FUERTE → degrada confianza de LONGs en alts
-- BTC en BULL FUERTE → degrada confianza de SHORTs en alts
-
-### Régimen del mercado (diagnóstico separado de la señal)
-
-| Régimen | Condición | Bias sugerido |
-|---------|-----------|---------------|
-| BULL FUERTE | 3 TFs alcistas + ADX > 35 | LONG en pullbacks |
-| BULL | 3 TFs alcistas | LONG en pullbacks |
-| BULL DÉBIL | 2 TFs alcistas | LONG con cautela |
-| LATERAL ESTRICTO | ADX < 20 | No operar tendencia |
-| LATERAL | 2 TFs laterales | No operar tendencia |
-| TRANSICIÓN | TFs desalineados | Esperar confirmación |
-| BEAR DÉBIL | 2 TFs bajistas | SHORT con cautela |
-| BEAR | 3 TFs bajistas | SHORT en rebotes |
-| BEAR FUERTE | 3 TFs bajistas + ADX > 35 | SHORT en rebotes |
+1. **Tendencia por timeframe** (`structure.py`): score −100..+100 que combina
+   - *Estructura* (±40): máximos y mínimos crecientes = alcista, decrecientes = bajista.
+     Detecta **BOS** (rompe el último swing a favor → continuación) y **CHoCH** (rompe el último
+     swing en contra → primera señal objetiva de giro, mucho antes que la EMA200).
+   - *Medias* (±30): precio vs EMA20/50/200 y pendiente de la EMA50.
+   - *Fuerza direccional* (±30): DI+ vs DI− escalado por ADX.
+   El **sesgo global** pondera 1W/1D/4H (cripto) o 1W/1D (acciones) y define el régimen
+   (BULL FUERTE … BEAR FUERTE, LATERAL, TRANSICIÓN).
+2. **Niveles estructurales** (`levels.py`): swings por fractales en 1H/4H/1D/1W, máximo/mínimo del
+   día y semana anterior, pivots diarios/semanales, nodos de volumen (perfil de volumen que reparte
+   el volumen de cada vela sobre su rango) y extremos de 52 semanas. Se agrupan en clusters (ancho
+   ≈ 0.45 ATR) y cada nivel recibe una **fuerza 0-100** según timeframe de origen, cantidad de
+   toques, recencia, volumen y si ya actuó como techo y piso (flip).
+3. **Ubicación del precio**: EN SOPORTE / EN RESISTENCIA / RANGO ESTRECHO / EN MEDIO DEL RANGO.
+4. **Timing 1H**: RSI6 girando, MACD, cierre sobre máximo previo, EMA20, VWAP.
+5. **Setups**:
+   - `PULLBACK`: tendencia a favor + precio apoyado en soporte (o rechazado en resistencia para
+     short) + timing que no va en contra + RSI14 no extremo.
+   - `BREAKOUT`: cierre sobre una resistencia (o bajo un soporte) de fuerza ≥ 25 con volumen > 1.3×
+     promedio o nivel fuerte.
+6. **Plan con niveles reales**: stop detrás del nivel (+0.5 ATR de buffer, tope 3 ATR), TP1/TP2 en las
+   siguientes resistencias/soportes, TP3 por extensión. R/R real. Si el TP1 queda a menos de 1.2R
+   la señal se **rechaza por falta de espacio**. Tamaño de posición por riesgo (`capital × risk_pct`).
+7. **Agotamiento** (0-100): CHoCH en contra, divergencias RSI/OBV con swings reales, ADX cayendo
+   desde pico, RSI6 extremo, MACD contrayéndose. ≥ 50 = posible giro → baja la confianza o dispara
+   PROTEGER GANANCIAS / ESPERAR EL PISO.
+8. **Confianza** ALTA/MEDIA/BAJA: alineación de timeframes, fuerza del nivel, timing, R/R ≥ 2,
+   funding, agotamiento en contra, CHoCH en contra, y (cripto) correlación con BTC.
+9. **Acción sugerida** en lenguaje claro: COMPRAR, COMPRAR (ruptura), VENDER / SHORT, MANTENER,
+   MANTENER NO COMPRAR, VIGILAR ENTRADA, PROTEGER GANANCIAS, REDUCIR, EMPEZAR A ACUMULAR,
+   NO COMPRAR TODAVÍA, FUERA DEL MERCADO, ESPERAR RUPTURA, ESPERAR — siempre con el porqué y los
+   niveles concretos.
+10. **Escenarios condicionales**: "si rompe X → objetivo Y; si pierde Z → siguiente soporte W".
 
 ---
 
-## Setup local (desarrollo)
+## Instalación
 
-### 1. Clonar
 ```bash
-git clone https://github.com/TU_USUARIO/CryptobotNico.git
-cd CryptobotNico
+pip install -r requirements.txt        # sin pandas-ta: indicadores en pandas puro
+cp config.example.json config.json     # editar
+python app.py                          # http://127.0.0.1:5000
 ```
 
-### 2. Instalar dependencias
+`config.json`:
+
+| clave | qué es |
+|---|---|
+| `telegram_token`, `telegram_chat_id` | BotFather. **Revocá el token viejo si lo compartiste.** |
+| `dashboard_token` | clave para entrar al dashboard. Vacío = sin auth (solo local). |
+| `host` | `127.0.0.1` (recomendado, entrar por túnel SSH/Tailscale) o `0.0.0.0` con token. |
+| `capital_disponible`, `risk_pct` | para el tamaño de posición del plan (2 % por defecto). |
+| `crypto_assets` | subconjunto de BTC, ETH, SOL, XRP, LINK. |
+| `full_analysis_interval_hours` | ciclo cripto (4). Chequeo de precios cada `ops_check_interval_minutes`. |
+| `stocks_enabled`, `stocks_hours_utc` | análisis de acciones a esas horas UTC (15 y 21 = media rueda y cierre). |
+| `stocks_telegram_digest` | manda el resumen de acciones por Telegram en cada análisis programado. |
+| `win_threshold_pct` | mínimo movimiento para contar WIN en acertividad (0.3 %). |
+
+Probar el motor sin levantar el dashboard:
+
 ```bash
-pip install -r requirements.txt
+python -c "from data import *; from engine import *; import json
+dfs = fetch_crypto_multi_tf('XBTUSD'); r = analyze_crypto('BTC', dfs, fetch_funding_rate('BTC'), 10000, 0.02)
+print(r['summary']); print(r['action'], '-', r['action_detail']); print(json.dumps(r['plan'], indent=1))"
 ```
 
-### 3. Configurar Telegram
+Probar la interfaz **sin internet** (datos inventados): `python run_offline.py`.
 
-Creá `config.json` en la raíz:
+Backtest de 2 años con historia de Yahoo (tarda varios minutos): `python backtest.py BTC yahoo`
+(o `kraken` para los últimos 4 meses, o desde la pestaña Acertividad).
+
+---
+
+## Watchlist de acciones
+
+`data/watchlist.json` (se crea con tu cartera de abril 2026). Editable desde la pestaña
+"Acciones y CEDEARs" o a mano:
+
 ```json
-{
-  "telegram_token": "TU_TOKEN",
-  "telegram_chat_id": "TU_CHAT_ID",
-  "capital_disponible": 10000,
-  "risk_pct": 0.025,
-  "full_analysis_interval_hours": 4,
-  "ops_check_interval_minutes": 2,
-  "win_threshold_pct": 0.3
-}
+{"ticker": "LLY", "cedear": "LLY.BA", "ratio": 20, "type": "cedear", "name": "Eli Lilly", "holding": false}
 ```
 
-**Obtener token:**
-1. Telegram → @BotFather
-2. `/newbot` → seguí pasos
-3. Copiá el TOKEN
-
-**Obtener chat_id:**
-1. Escribile algo a tu bot
-2. Abrí: `https://api.telegram.org/botTU_TOKEN/getUpdates`
-3. Buscá `"chat":{"id":123456789}` → copiá el número
-
-### 4. Probar el motor
-```bash
-python engine.py
-```
-
-### 5. Correr el dashboard
-```bash
-python app.py
-```
-Abrí http://localhost:5000
+- `ticker`: símbolo Yahoo del subyacente (`NVDA`, `SPY`) o de la acción argentina (`YPFD.BA`).
+- `ratio`: CEDEARs por acción. **Verificar en BYMA/Comafi** — cambian con splits. Solo afecta el
+  CCL implícito (`precio_cedear_ARS × ratio / precio_USD`).
 
 ---
 
-## Deploy en DigitalOcean
+## Deploy (DigitalOcean / cualquier VPS)
 
-### 1. Crear Droplet
-- **OS**: Ubuntu 24.04 LTS
-- **Plan**: Basic (1GB RAM / 1 vCPU) — $6/mes
-- **Región**: la más cercana a vos
-
-### 2. SSH inicial
 ```bash
-ssh root@TU_IP_DROPLET
+apt update && apt install -y python3-pip python3-venv git
+git clone TU_REPO /root/signalbot && cd /root/signalbot
+python3 -m venv venv && venv/bin/pip install -r requirements.txt
+nano config.json    # token de Telegram, dashboard_token, host
 ```
 
-### 3. Instalar dependencias del sistema
-```bash
-apt update && apt upgrade -y
-apt install -y python3-pip python3-venv git
-```
-
-### 4. Clonar repo
-```bash
-cd /root
-git clone https://github.com/TU_USUARIO/CryptobotNico.git Crypto-signal-bot
-cd Crypto-signal-bot
-```
-
-### 5. Instalar dependencias Python
-```bash
-pip3 install --break-system-packages -r requirements.txt
-```
-
-### 6. Configurar `config.json`
-```bash
-nano config.json
-```
-
-### 7. Crear servicio systemd
-```bash
-nano /etc/systemd/system/cryptobot.service
-```
+`/etc/systemd/system/signalbot.service`:
 
 ```ini
 [Unit]
-Description=Crypto Signal Bot v3.0
+Description=Signal Bot v4
 After=network.target
-
 [Service]
-User=root
-WorkingDirectory=/root/Crypto-signal-bot
-ExecStart=/usr/bin/python3 app.py
+WorkingDirectory=/root/signalbot
+ExecStart=/root/signalbot/venv/bin/python app.py
 Restart=always
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
 [Install]
 WantedBy=multi-user.target
 ```
 
-### 8. Activar y arrancar
 ```bash
-systemctl daemon-reload
-systemctl enable cryptobot
-systemctl start cryptobot
-systemctl status cryptobot
+systemctl daemon-reload && systemctl enable --now signalbot
+journalctl -u signalbot -f
 ```
 
-### 9. Abrir firewall
-```bash
-ufw allow 5000/tcp
-ufw reload
-```
-
-### 10. Acceder al dashboard
-```
-http://TU_IP_DROPLET:5000
-```
+Acceso recomendado: dejar `host: 127.0.0.1` y abrir un túnel `ssh -L 5000:127.0.0.1:5000 root@IP`
+(o Tailscale). Si abrís el puerto al público, usá `host: 0.0.0.0` **con `dashboard_token` fuerte**
+y HTTPS detrás de Caddy/nginx.
 
 ---
 
-## Comandos útiles
-
-```bash
-# Ver logs
-journalctl -u cryptobot -n 50 --no-pager
-journalctl -u cryptobot -f  # modo follow
-
-# Reiniciar
-systemctl restart cryptobot
-
-# Actualizar desde GitHub
-cd /root/Crypto-signal-bot
-git pull origin main
-systemctl restart cryptobot
-
-# Backup
-cp /root/Crypto-signal-bot/data/*.db ~/backup/
-```
-
----
-
-## Estructura del proyecto
+## Estructura
 
 ```
-Crypto-signal-bot/
-├── engine.py              # Motor de análisis técnico v3.0
-├── tracker.py             # Sistema de acertividad
-├── operations.py          # Gestión de operaciones (USDT-M + COIN-M)
-├── telegram_bot.py        # Notificaciones Telegram
-├── app.py                 # Dashboard Flask + scheduler dual
-├── config.json            # Configuración
-├── requirements.txt
-├── templates/
-│   └── dashboard.html     # UI con 4 pestañas
-└── data/                  # Generado automáticamente
-    ├── signals.db
-    ├── operations.db
-    └── last_results.json
+indicators.py     EMA/RSI/MACD/ADX/ATR/BB/OBV/StochRSI/VWAP en pandas puro, resample
+data.py           Kraken, funding (Binance→Bybit→OKX), Yahoo (acciones, CEDEARs, historia), sintético
+levels.py         swings, perfil de volumen, pivots, clustering y fuerza de niveles
+structure.py      estructura HH/HL, BOS/CHoCH, trend_score, divergencias con swings, agotamiento
+engine.py         análisis completo, setups, plan por niveles, acción sugerida, escenarios, filtro BTC
+stocks.py         watchlist, análisis de acciones/CEDEARs, CCL implícito, resumen
+tracker.py        registro de señales, outcomes a tiempo exacto, estadísticas, evolución
+paper_trading.py  operaciones ficticias con stop/TP por high-low, fees, profit factor, R promedio
+operations.py     operaciones manuales (USDT-M / COIN-M), PnL, liquidación, alertas de cierre
+telegram_bot.py   mensajes
+backtest.py       backtest multi-timeframe sin lookahead
+app.py            Flask + scheduler + auth + estado persistente
+run_offline.py    dashboard con datos sintéticos (sin internet)
+templates/dashboard.html, static/lightweight-charts...  UI
+data/             (generado) signals.db, paper_trades.db, operations.db, watchlist.json, state.json, caches
 ```
 
----
+## API
 
-## Acertividad realista
+`/api/data` cripto · `/api/stocks` acciones · `/api/watchlist` (GET/POST, DELETE `/api/watchlist/<t>`)
+· `/api/candles/<asset>?tf=4h&type=crypto|stock` · `/api/stats?type=` · `/api/evolution?type=` ·
+`/api/paper?type=` · `/api/signals` · `/api/backtest/<asset>?source=yahoo|kraken` ·
+`/api/operations/*` · `/api/refresh`, `/api/stocks/refresh`. Todas aceptan header `X-Token`.
 
-El sistema aplica **threshold de 0.3%** para considerar WIN/LOSS:
-- Movimiento < 0.3% → dentro de fees + slippage → no cuenta
-- Solo movimientos > threshold se consideran
+## Qué cambió respecto de v3
 
-Un bot con 70% win rate sin threshold puede tener 45% real. Este bot reporta la métrica que importa.
-
----
-
-## Troubleshooting
-
-### Funding rate "no disponible"
-Binance bloquea desde algunos hosts (403/451). El sistema sigue funcionando sin este indicador — perdés el ajuste de ±1 punto pero el resto opera normal.
-
-### Dashboard no carga
-```bash
-systemctl status cryptobot
-ufw status | grep 5000
-journalctl -u cryptobot -n 50
-```
-
-### Telegram no envía
-1. Verificá token en `config.json`
-2. Escribile `/start` al bot
-3. Verificá chat_id
-
-### Base de datos corrupta
-```bash
-cd /root/Crypto-signal-bot/data
-rm signals.db operations.db
-systemctl restart cryptobot
-```
-
----
-
-## Roadmap
-
-- [ ] Soporte para Bybit, OKX (fallback funding rate)
-- [ ] Backtesting histórico
-- [ ] Machine learning para optimizar pesos
-- [ ] Modo paper trading integrado
-
----
-
-## Licencia
-MIT
-
-## Disclaimer
-Este bot es una **herramienta de análisis**, no ejecuta operaciones automáticamente.
-Toda decisión de trading es responsabilidad del usuario.
-Crypto trading implica riesgo de pérdida total del capital.
+- Sin `pandas-ta` (problemas con numpy); indicadores propios y causales.
+- Soportes/resistencias estructurales multi-timeframe con fuerza, en vez de pivots de una vela 4H.
+- Stop y objetivos en niveles reales con R/R real y rechazo por falta de espacio, en vez de múltiplos
+  fijos de ATR.
+- Tendencia graduada por estructura (BOS/CHoCH) en vez de alineación binaria de EMAs.
+- Divergencias sobre swings reales (no mitades de ventana).
+- Score sin indicadores redundantes (5 de los 17 medían lo mismo).
+- Outcomes medidos con la vela histórica exacta; paper trading con high/low.
+- Estado persistente (no re-manda todas las señales al reiniciar), lock del análisis, auth por
+  token, host local por defecto.
+- Pestaña de acciones/CEDEARs, gráfico con niveles, escenarios con niveles reales.
+- Backtest multi-timeframe con 2 años de historia (Yahoo), no 720 velas.

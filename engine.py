@@ -1,1867 +1,488 @@
 """
-Motor de datos y calculo de indicadores v2.1
-Fuente: Kraken API publica
+Motor de analisis v4 — tendencia por estructura + soportes/resistencias reales.
 
-Capas de analisis:
-  1. Filtro macro 1W (tendencia semanal)
-  2. Filtro tendencia 1D
-  3. Setup de entrada 4H (scoring principal)
-  4. Confirmacion 1H (timing)
+Flujo por activo:
+  1. Indicadores en cada timeframe.
+  2. Tendencia por timeframe (structure.trend_score) y sesgo global ponderado.
+  3. Niveles estructurales (levels.build_levels).
+  4. Ubicacion del precio respecto de los niveles: en soporte, en resistencia,
+     en medio del rango, rompiendo.
+  5. Timing en el marco corto (1H): momentum girando a favor.
+  6. Setup: PULLBACK (compra en soporte con tendencia a favor), BREAKOUT
+     (ruptura de resistencia con volumen), o nada.
+  7. Stop y objetivos con NIVELES REALES (stop detras del soporte, TP en la
+     siguiente resistencia), R/R real, y rechazo si no hay espacio.
+  8. Agotamiento / giro (structure.exhaustion) como freno.
+  9. Accion sugerida en lenguaje claro para tres usos: trading, comprar/vender
+     en cartera, y entender la situacion.
 
-Indicadores: EMA20/50/200, Bollinger Bands + Width, RSI (6/14/20),
-StochRSI, MACD, ADX + DI, OBV, VWAP diario, ATR, divergencias RSI, pivots.
+El mismo motor sirve para cripto (long/short, marco 4H) y acciones/CEDEARs
+(solo long, marco 1D).
 """
 
-import time
-import requests
-import pandas as pd
+from datetime import datetime, timezone
 import numpy as np
-import pandas_ta as ta
-from datetime import datetime
+import pandas as pd
 
-# ── Configuracion ─────────────────────────────────────────────────────────────
+from indicators import add_indicators, add_daily_vwap
+from levels import build_levels, find_swings, TF_FRACTAL
+from structure import trend_score, exhaustion, divergences
 
-SYMBOLS = {
-    "BTC": "XBTUSD",
-    "ETH": "ETHUSD",
-    "SOL": "SOLUSD",
-    "XRP": "XRPUSD",
-    "LINK": "LINKUSD",
+# Ponderacion de los timeframes en el sesgo global
+BIAS_WEIGHTS = {
+    "crypto": {"1w": 0.30, "1d": 0.35, "4h": 0.35},
+    "stock": {"1w": 0.45, "1d": 0.55},
 }
 
-KRAKEN_URL = "https://api.kraken.com/0/public/OHLC"
-KRAKEN_INTERVALS = {"1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
 
-# Funding rate - multiples fuentes con fallback en cascada
-# Todos los exchanges pagan funding cada 8h y reportan el rate del periodo actual.
-BINANCE_FUNDING_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
-BYBIT_FUNDING_URL = "https://api.bybit.com/v5/market/tickers"
-OKX_FUNDING_URL = "https://www.okx.com/api/v5/public/funding-rate"
-
-# Simbolos por exchange (cada uno usa su propia nomenclatura)
-FUNDING_SYMBOLS = {
-    "BTC": {"binance": "BTCUSDT", "bybit": "BTCUSDT", "okx": "BTC-USDT-SWAP"},
-    "ETH": {"binance": "ETHUSDT", "bybit": "ETHUSDT", "okx": "ETH-USDT-SWAP"},
-    "SOL": {"binance": "SOLUSDT", "bybit": "SOLUSDT", "okx": "SOL-USDT-SWAP"},
-    "XRP": {"binance": "XRPUSDT", "bybit": "XRPUSDT", "okx": "XRP-USDT-SWAP"},
-    "LINK": {"binance": "LINKUSDT", "bybit": "LINKUSDT", "okx": "LINK-USDT-SWAP"},
-}
-
-# Score maximo teorico (suma de todos los pesos positivos)
-# EMA: 3 | Bollinger MB: 1 | VWAP: 1 | MACD: 2 | StochRSI: 1 |
-# RSI20: 1 | Divergencia RSI: 3 | OBV: 1 | Divergencia OBV: 2 | Volumen: 1 = 16
-# + Funding rate: ±1 (opcional, si Binance esta disponible) = 17
-MAX_SCORE = 17
-SIGNAL_THRESHOLD = 9  # umbral base (se ajusta por ADX dinamicamente via get_adaptive_threshold)
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-# ── Fetch de velas ────────────────────────────────────────────────────────────
-
-def fetch_candles(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
-    params = {"pair": symbol, "interval": KRAKEN_INTERVALS[interval]}
-    resp = requests.get(KRAKEN_URL, params=params, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("error"):
-        raise ValueError(f"Kraken error: {data['error']}")
-    result = data["result"]
-    pair_key = [k for k in result.keys() if k != "last"][0]
-    raw = result[pair_key]
-    df = pd.DataFrame(raw, columns=[
-        "open_time", "open", "high", "low", "close", "vwap_raw", "volume", "count"
-    ])
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="s")
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
-    df.set_index("open_time", inplace=True)
-    return df[["open", "high", "low", "close", "volume"]].tail(limit)
+def _lab(level, fem=False):
+    """Etiqueta de fuerza en minuscula con genero (soporte fuerte / resistencia media)."""
+    if not level:
+        return ""
+    m = {"FUERTE": "fuerte", "MEDIO": "media" if fem else "medio", "DEBIL": "debil"}
+    return m.get(level["label"], level["label"].lower())
 
 
-# ── Fetch funding rate (Binance Futures - sentimiento de perpetuos) ──────────
-
-# ── Fetch funding rate (multi-fuente con fallback) ───────────────────────────
-
-def _fetch_binance_funding(symbol: str) -> float:
-    """Devuelve funding rate en porcentaje (8h). Lanza excepcion si falla."""
-    resp = requests.get(BINANCE_FUNDING_URL, params={"symbol": symbol},
-                        timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-    if resp.status_code in (451, 403):
-        raise PermissionError(f"Binance bloqueado ({resp.status_code})")
-    resp.raise_for_status()
-    data = resp.json()
-    return float(data["lastFundingRate"]) * 100
+def _fmt(p):
+    if p is None:
+        return "—"
+    if abs(p) >= 1000:
+        return f"${p:,.0f}"
+    if abs(p) >= 10:
+        return f"${p:,.2f}"
+    return f"${p:,.4f}"
 
 
-def _fetch_bybit_funding(symbol: str) -> float:
-    """Devuelve funding rate en porcentaje (8h). Lanza excepcion si falla."""
-    resp = requests.get(BYBIT_FUNDING_URL,
-                        params={"category": "linear", "symbol": symbol},
-                        timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-    if resp.status_code in (451, 403):
-        raise PermissionError(f"Bybit bloqueado ({resp.status_code})")
-    resp.raise_for_status()
-    data = resp.json()
-    lst = data.get("result", {}).get("list", [])
-    if not lst:
-        raise ValueError("Bybit sin datos")
-    return float(lst[0]["fundingRate"]) * 100
-
-
-def _fetch_okx_funding(symbol: str) -> float:
-    """Devuelve funding rate en porcentaje (8h). Lanza excepcion si falla."""
-    resp = requests.get(OKX_FUNDING_URL, params={"instId": symbol},
-                        timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-    if resp.status_code in (451, 403):
-        raise PermissionError(f"OKX bloqueado ({resp.status_code})")
-    resp.raise_for_status()
-    data = resp.json()
-    lst = data.get("data", [])
-    if not lst:
-        raise ValueError("OKX sin datos")
-    return float(lst[0]["fundingRate"]) * 100
-
-
-def _classify_funding(rate_pct: float, source: str) -> dict:
-    """Clasifica un funding rate (en %, periodo 8h) en sentimiento + ajuste de score."""
-    if rate_pct > 0.10:
-        sentiment, signal_impact, score_adj = "EUFORIA ALCISTA", "BEARISH", -1
-    elif rate_pct > 0.05:
-        sentiment, signal_impact, score_adj = "Sobrecompra emocional", "BEARISH", -1
-    elif rate_pct < -0.10:
-        sentiment, signal_impact, score_adj = "CAPITULACIÓN BAJISTA", "BULLISH", 1
-    elif rate_pct < -0.05:
-        sentiment, signal_impact, score_adj = "Sobreventa emocional", "BULLISH", 1
-    else:
-        sentiment, signal_impact, score_adj = "Neutral", "NEUTRAL", 0
-
-    return {
-        "rate": round(rate_pct, 4),
-        "rate_annualized": round(rate_pct * 3 * 365, 2),  # 3 periodos/dia × 365
-        "sentiment": sentiment,
-        "signal_impact": signal_impact,
-        "score_adj": score_adj,
-        "source": source,
-        "available": True,
-    }
-
-
-def fetch_funding_rate(asset: str) -> dict:
-    """
-    Funding rate de perpetuos. Indicador de sentimiento real del mercado.
-
-    - Funding POSITIVO: longs pagan a shorts → sobrecomprado emocionalmente
-      * > 0.10% (8h)  → euforia, alta probabilidad de correccion (bearish)
-      * > 0.05% (8h)  → sobrecompra emocional (bearish)
-    - Funding NEGATIVO: shorts pagan a longs → sobrevendido emocionalmente
-      * < -0.10% (8h) → capitulacion, alta probabilidad de rebote (bullish)
-      * < -0.05% (8h) → sobreventa emocional (bullish)
-
-    Fallback en cascada: Binance → Bybit → OKX. Si los 3 fallan (raro),
-    devuelve available=False y el sistema sigue funcionando sin este indicador.
-    """
-    symbols = FUNDING_SYMBOLS.get(asset)
-    if not symbols:
-        return {"rate": None, "available": False, "reason": "Asset no soportado"}
-
-    # Cascada de fuentes: el primero que responda gana
-    sources = [
-        ("binance", _fetch_binance_funding, symbols["binance"]),
-        ("bybit",   _fetch_bybit_funding,   symbols["bybit"]),
-        ("okx",     _fetch_okx_funding,     symbols["okx"]),
-    ]
-
-    errors = []
-    for name, fetcher, symbol in sources:
-        try:
-            rate_pct = fetcher(symbol)
-            return _classify_funding(rate_pct, name)
-        except Exception as e:
-            errors.append(f"{name}: {str(e)[:30]}")
+def prepare_frames(dfs: dict) -> dict:
+    """Agrega indicadores (y VWAP diario a los intradiarios). Ignora None."""
+    out = {}
+    for tf, df in dfs.items():
+        if df is None or len(df) < 30:
             continue
-
-    # Los 3 fallaron
-    return {
-        "rate": None,
-        "available": False,
-        "reason": "Todas las fuentes fallaron — " + " | ".join(errors),
-    }
-
-
-# ── Calculo de indicadores ────────────────────────────────────────────────────
-
-def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    c = df["close"]
-    h = df["high"]
-    l = df["low"]
-    v = df["volume"]
-
-    # Medias moviles
-    df["MA20"]   = ta.sma(c, 20)
-    df["MA50"]   = ta.sma(c, 50)
-    df["MA200"]  = ta.sma(c, 200)
-    df["EMA20"]  = ta.ema(c, 20)
-    df["EMA50"]  = ta.ema(c, 50)
-    df["EMA200"] = ta.ema(c, 200)
-
-    # Bollinger Bands + BB Width
-    bb = ta.bbands(c, length=20, std=2)
-    bb_up_col = [col for col in bb.columns if col.startswith("BBU")][0]
-    bb_mb_col = [col for col in bb.columns if col.startswith("BBM")][0]
-    bb_dn_col = [col for col in bb.columns if col.startswith("BBL")][0]
-    df["BB_UP"] = bb[bb_up_col]
-    df["BB_MB"] = bb[bb_mb_col]
-    df["BB_DN"] = bb[bb_dn_col]
-    df["BB_WIDTH"] = (df["BB_UP"] - df["BB_DN"]) / df["BB_MB"]
-
-    # RSI multiple
-    df["RSI6"]  = ta.rsi(c, 6)
-    df["RSI14"] = ta.rsi(c, 14)
-    df["RSI20"] = ta.rsi(c, 20)
-
-    # Stochastic RSI (3,3,14,14)
-    try:
-        stoch = ta.stochrsi(c, length=14, rsi_length=14, k=3, d=3)
-        if stoch is not None and not stoch.empty:
-            k_col = [col for col in stoch.columns if "_K" in col]
-            d_col = [col for col in stoch.columns if "_D" in col]
-            if k_col: df["STOCH_K"] = stoch[k_col[0]]
-            if d_col: df["STOCH_D"] = stoch[d_col[0]]
-    except Exception:
-        pass
-
-    # MACD (12,26,9)
-    macd = ta.macd(c, fast=12, slow=26, signal=9)
-    macd_col  = [col for col in macd.columns if col.startswith("MACD_")][0]
-    macds_col = [col for col in macd.columns if col.startswith("MACDs")][0]
-    macdh_col = [col for col in macd.columns if col.startswith("MACDh")][0]
-    df["MACD"]        = macd[macd_col]
-    df["MACD_SIGNAL"] = macd[macds_col]
-    df["MACD_HIST"]   = macd[macdh_col]
-
-    # ADX (14)
-    adx = ta.adx(h, l, c, length=14)
-    adx_col = [col for col in adx.columns if col.startswith("ADX_")][0]
-    dmp_col = [col for col in adx.columns if col.startswith("DMP_")][0]
-    dmn_col = [col for col in adx.columns if col.startswith("DMN_")][0]
-    df["ADX"]    = adx[adx_col]
-    df["DI_POS"] = adx[dmp_col]
-    df["DI_NEG"] = adx[dmn_col]
-
-    # OBV
-    df["OBV"]      = ta.obv(c, v)
-    df["OBV_MA20"] = ta.sma(df["OBV"], 20)
-
-    # ATR (14)
-    df["ATR"] = ta.atr(h, l, c, length=14)
-
-    # Volumen MA
-    df["VOL_MA10"] = ta.sma(v, 10)
-
-    return df
+        d = df.copy()
+        add_indicators(d)
+        if tf in ("1h", "4h"):
+            add_daily_vwap(d)
+        out[tf] = d
+    return out
 
 
-def add_daily_vwap(df: pd.DataFrame) -> pd.DataFrame:
+# ── Timing en el marco corto ──────────────────────────────────────────────────
+
+def timing_state(df: pd.DataFrame) -> dict:
     """
-    Calcula VWAP que se resetea por dia (estandar institucional).
-    Usa typical price = (H+L+C)/3.
+    Momentum de corto plazo en la ultima vela cerrada: cuenta senales de giro
+    alcista y bajista (RSI6 girando, MACD hist, cierre sobre el maximo previo,
+    precio vs EMA20 y VWAP).
     """
-    tp = (df["high"] + df["low"] + df["close"]) / 3
-    pv = tp * df["volume"]
-    day = df.index.normalize()
-    df["VWAP"] = pv.groupby(day).cumsum() / df["volume"].groupby(day).cumsum()
-    return df
-
-
-# ── Divergencias RSI (correcta: minimos secuenciales) ─────────────────────────
-
-def detect_rsi_divergence(df: pd.DataFrame, lookback: int = 30) -> dict:
-    """
-    Detecta divergencias usando dos minimos/maximos secuenciales reales.
-    Logica:
-      - Busca el minimo mas reciente en la primera mitad del lookback
-      - Busca el minimo mas reciente en la segunda mitad
-      - Compara cronologicamente: minimo viejo vs minimo nuevo
-
-    Divergencia alcista: precio hace minimo mas bajo, RSI mas alto
-    Divergencia bajista: precio hace maximo mas alto, RSI mas bajo
-    """
-    if len(df) < lookback + 2 or "RSI14" not in df.columns:
-        return {"bullish": False, "bearish": False}
-
-    recent = df.tail(lookback).dropna(subset=["RSI14"])
-    if len(recent) < 10:
-        return {"bullish": False, "bearish": False}
-
-    # Dividir en dos mitades cronologicas
-    mid       = len(recent) // 2
-    first_half  = recent.iloc[:mid]
-    second_half = recent.iloc[mid:]
-
-    # ── Divergencia alcista: dos minimos ──────────────────────────────────────
-    p_low_idx_1 = first_half["close"].idxmin()
-    p_low_idx_2 = second_half["close"].idxmin()
-    p_low_1 = first_half.loc[p_low_idx_1, "close"]
-    p_low_2 = second_half.loc[p_low_idx_2, "close"]
-    rsi_low_1 = first_half.loc[p_low_idx_1, "RSI14"]
-    rsi_low_2 = second_half.loc[p_low_idx_2, "RSI14"]
-
-    bullish = (
-        p_low_2 < p_low_1            # precio segundo minimo mas bajo
-        and rsi_low_2 > rsi_low_1 + 3 # RSI segundo minimo mas alto (margen 3 puntos)
-        and rsi_low_1 < 40            # primer minimo en zona de sobreventa
-    )
-
-    # ── Divergencia bajista: dos maximos ──────────────────────────────────────
-    p_high_idx_1 = first_half["close"].idxmax()
-    p_high_idx_2 = second_half["close"].idxmax()
-    p_high_1 = first_half.loc[p_high_idx_1, "close"]
-    p_high_2 = second_half.loc[p_high_idx_2, "close"]
-    rsi_high_1 = first_half.loc[p_high_idx_1, "RSI14"]
-    rsi_high_2 = second_half.loc[p_high_idx_2, "RSI14"]
-
-    bearish = (
-        p_high_2 > p_high_1
-        and rsi_high_2 < rsi_high_1 - 3
-        and rsi_high_1 > 60           # primer maximo en zona de sobrecompra
-    )
-
-    return {"bullish": bool(bullish), "bearish": bool(bearish)}
-
-
-# ── Divergencias OBV (precio vs volumen acumulado) ───────────────────────────
-
-def detect_obv_divergence(df: pd.DataFrame, lookback: int = 30) -> dict:
-    """
-    Detecta divergencias entre precio y OBV.
-
-    Divergencia alcista OBV: precio hace minimo mas bajo, OBV hace minimo mas alto
-      → grandes manos compran mientras retail vende = posible reversion alcista
-
-    Divergencia bajista OBV: precio hace maximo mas alto, OBV hace maximo mas bajo
-      → grandes manos venden mientras retail compra = posible reversion bajista
-
-    Mas confiable que divergencia RSI porque mide presion REAL de volumen,
-    no solo momentum del precio.
-    """
-    if len(df) < lookback + 2 or "OBV" not in df.columns:
-        return {"bullish": False, "bearish": False}
-
-    recent = df.tail(lookback).dropna(subset=["OBV"])
-    if len(recent) < 10:
-        return {"bullish": False, "bearish": False}
-
-    mid = len(recent) // 2
-    first_half  = recent.iloc[:mid]
-    second_half = recent.iloc[mid:]
-
-    # ── Divergencia alcista ──────────────────────────────────────────────────
-    p_low_idx_1 = first_half["close"].idxmin()
-    p_low_idx_2 = second_half["close"].idxmin()
-    p_low_1 = first_half.loc[p_low_idx_1, "close"]
-    p_low_2 = second_half.loc[p_low_idx_2, "close"]
-    obv_low_1 = first_half.loc[p_low_idx_1, "OBV"]
-    obv_low_2 = second_half.loc[p_low_idx_2, "OBV"]
-
-    # Margen de 0.5% para precio (significativo) y OBV creciendo (acumulacion)
-    bullish = (
-        p_low_2 < p_low_1 * 0.995
-        and obv_low_2 > obv_low_1
-    )
-
-    # ── Divergencia bajista ──────────────────────────────────────────────────
-    p_high_idx_1 = first_half["close"].idxmax()
-    p_high_idx_2 = second_half["close"].idxmax()
-    p_high_1 = first_half.loc[p_high_idx_1, "close"]
-    p_high_2 = second_half.loc[p_high_idx_2, "close"]
-    obv_high_1 = first_half.loc[p_high_idx_1, "OBV"]
-    obv_high_2 = second_half.loc[p_high_idx_2, "OBV"]
-
-    bearish = (
-        p_high_2 > p_high_1 * 1.005
-        and obv_high_2 < obv_high_1
-    )
-
-    return {"bullish": bool(bullish), "bearish": bool(bearish)}
-
-
-# ── Pivots classicos (sobre vela anterior) ───────────────────────────────────
-
-def calculate_pivots(df: pd.DataFrame) -> dict:
-    """
-    Pivots clasicos usando vela anterior cerrada (vela -2, ya que -1 puede estar activa).
-    Estandar: pivot = (H+L+C)/3 de la vela previa.
-    """
-    if len(df) < 3:
-        return {}
-    prev = df.iloc[-3]  # vela cerrada previa a la ultima cerrada
-    pivot = (prev["high"] + prev["low"] + prev["close"]) / 3
-    rng   = prev["high"] - prev["low"]
-    return {
-        "pivot": round(pivot, 4),
-        "r1": round(2 * pivot - prev["low"], 4),
-        "r2": round(pivot + rng, 4),
-        "s1": round(2 * pivot - prev["high"], 4),
-        "s2": round(pivot - rng, 4),
-    }
-
-
-# ── Tendencia por timeframe ──────────────────────────────────────────────────
-
-def get_trend(row: pd.Series) -> str:
-    """
-    Tendencia basada en alineacion de 3 EMAs (20, 50, 200).
-
-    Estandar de la industria para evitar 'bear/bull traps':
-    - ALCISTA: precio > EMA20 > EMA50 > EMA200 (alineacion completa)
-    - BAJISTA: precio < EMA20 < EMA50 < EMA200 (alineacion completa)
-    - LATERAL: cualquier desalineacion
-
-    Para timeframes con pocos datos (1W con < 200 velas), usa EMA50 como fallback.
-    """
-    if pd.isna(row.get("EMA20")) or pd.isna(row.get("EMA50")):
-        return "LATERAL"
-
-    price = row["close"]
-    ema20 = row["EMA20"]
-    ema50 = row["EMA50"]
-    ema200 = row.get("EMA200")
-
-    # Si EMA200 no esta disponible (pocas velas), usar logica de 2 EMAs
-    if pd.isna(ema200):
-        if price > ema20 and ema20 > ema50:
-            return "ALCISTA"
-        if price < ema20 and ema20 < ema50:
-            return "BAJISTA"
-        return "LATERAL"
-
-    # Logica completa con 3 EMAs (mas precisa)
-    if price > ema20 and ema20 > ema50 and ema50 > ema200:
-        return "ALCISTA"
-    if price < ema20 and ema20 < ema50 and ema50 < ema200:
-        return "BAJISTA"
-    return "LATERAL"
-
-
-# ── Régimen del mercado (separado de la señal operativa) ─────────────────────
-
-def get_regime(trend_1w: str, trend_1d: str, trend_1h: str, adx: float) -> dict:
-    """
-    Clasifica el REGIMEN del mercado (en qué estado estamos) independiente
-    de si hay buena oportunidad operativa AHORA.
-
-    Diseño: separar "diagnóstico" de "tratamiento".
-    - Régimen: ¿estamos en bear, bull, lateral?
-    - Señal operativa: ¿es buen momento para entrar?
-
-    Da contexto incluso cuando la señal es NEUTRAL.
-    """
-    if pd.isna(adx):
-        adx = 0
-
-    # Alinear timeframes
-    tfs = [trend_1w, trend_1d, trend_1h]
-    bullish_count = sum(1 for t in tfs if t == "ALCISTA")
-    bearish_count = sum(1 for t in tfs if t == "BAJISTA")
-    lateral_count = sum(1 for t in tfs if t == "LATERAL")
-
-    # ── Régimen primario ────────────────────────────────────────────────────
-    if bullish_count >= 2 and adx >= 25:
-        if bullish_count == 3 and adx >= 35:
-            regime = "BULL FUERTE"
-            description = "Tendencia alcista clara en todos los timeframes con fuerza"
-        elif bullish_count == 3:
-            regime = "BULL"
-            description = "Tendencia alcista en todos los timeframes"
+    if df is None or len(df) < 5:
+        return {"bull": 0, "bear": 0, "direction": "—", "detail": []}
+    r, p = df.iloc[-2], df.iloc[-3]
+    bull, bear, det = 0, 0, []
+    if pd.notna(r["RSI6"]) and pd.notna(p["RSI6"]):
+        if r["RSI6"] > p["RSI6"] and r["RSI6"] > 40:
+            bull += 1; det.append("RSI6 girando al alza")
+        elif r["RSI6"] < p["RSI6"] and r["RSI6"] < 60:
+            bear += 1; det.append("RSI6 girando a la baja")
+    if pd.notna(r["MACD_HIST"]) and pd.notna(p["MACD_HIST"]):
+        if r["MACD_HIST"] > p["MACD_HIST"]:
+            bull += 1; det.append("MACD acelerando al alza")
         else:
-            regime = "BULL DÉBIL"
-            description = "Alcista predominante con un timeframe lateral o contrario"
-    elif bearish_count >= 2 and adx >= 25:
-        if bearish_count == 3 and adx >= 35:
-            regime = "BEAR FUERTE"
-            description = "Tendencia bajista clara en todos los timeframes con fuerza"
-        elif bearish_count == 3:
-            regime = "BEAR"
-            description = "Tendencia bajista en todos los timeframes"
+            bear += 1; det.append("MACD acelerando a la baja")
+    if r["close"] > p["high"]:
+        bull += 1; det.append("cierre sobre el maximo previo")
+    elif r["close"] < p["low"]:
+        bear += 1; det.append("cierre bajo el minimo previo")
+    if pd.notna(r["EMA20"]):
+        if r["close"] > r["EMA20"]:
+            bull += 1
         else:
-            regime = "BEAR DÉBIL"
-            description = "Bajista predominante con un timeframe lateral o contrario"
-    elif adx < 20:
-        regime = "LATERAL ESTRICTO"
-        description = "Sin tendencia clara (ADX muy bajo) — rangeo puro"
-    elif lateral_count >= 2:
+            bear += 1
+    vw = r.get("VWAP")
+    if vw is not None and pd.notna(vw):
+        if r["close"] > vw:
+            bull += 1; det.append("sobre VWAP")
+        else:
+            bear += 1; det.append("bajo VWAP")
+    direction = "ALCISTA" if bull >= bear + 2 else "BAJISTA" if bear >= bull + 2 else "NEUTRO"
+    return {"bull": bull, "bear": bear, "direction": direction, "detail": det,
+            "rsi6": round(float(r["RSI6"]), 1) if pd.notna(r["RSI6"]) else None}
+
+
+# ── Analisis principal ────────────────────────────────────────────────────────
+
+def analyze_frames(name: str, frames: dict, asset_type: str = "crypto",
+                   allow_short: bool = True, funding: dict | None = None,
+                   capital: float = 10000, risk_pct: float = 0.02) -> dict:
+    """
+    frames: dict tf -> DataFrame YA con indicadores (prepare_frames).
+    asset_type: "crypto" (marco 4H) o "stock" (marco 1D).
+    """
+    ref_tf = "4h" if asset_type == "crypto" else "1d"
+    ref = frames.get(ref_tf)
+    if ref is None or len(ref) < 60:
+        return {"name": name, "error": f"Datos insuficientes en {ref_tf}"}
+
+    last_closed = ref.iloc[-2]
+    price = float(ref["close"].iloc[-1])          # ultimo precio conocido
+    price_closed = float(last_closed["close"])
+    atr = float(last_closed["ATR"]) if pd.notna(last_closed["ATR"]) else float((ref["high"] - ref["low"]).tail(14).mean())
+
+    # ── Tendencias por timeframe ──
+    swings = {tf: find_swings(df, TF_FRACTAL[tf], TF_FRACTAL[tf]) for tf, df in frames.items() if tf in TF_FRACTAL}
+    trends = {tf: trend_score(df, swings.get(tf), TF_FRACTAL[tf]) for tf, df in frames.items() if tf in TF_FRACTAL}
+    weights = BIAS_WEIGHTS[asset_type]
+    bias = sum(trends[tf]["score"] * w for tf, w in weights.items() if tf in trends) / \
+        max(sum(w for tf, w in weights.items() if tf in trends), 1e-9)
+    bias = int(round(bias))
+    labels = [trends[tf]["label"] for tf in weights if tf in trends]
+    n_up = sum("ALCISTA" in l for l in labels)
+    n_dn = sum("BAJISTA" in l for l in labels)
+    aligned = (n_up == len(labels)) or (n_dn == len(labels))
+
+    if bias >= 55 and aligned:
+        regime = "BULL FUERTE"
+    elif bias >= 20:
+        regime = "BULL" if n_dn == 0 else "BULL DEBIL"
+    elif bias <= -55 and aligned:
+        regime = "BEAR FUERTE"
+    elif bias <= -20:
+        regime = "BEAR" if n_up == 0 else "BEAR DEBIL"
+    elif n_up and n_dn:
+        regime = "TRANSICION"
+    else:
         regime = "LATERAL"
-        description = "Múltiples timeframes laterales — sin convicción"
-    else:
-        regime = "TRANSICIÓN"
-        description = "Timeframes desalineados — posible cambio de tendencia"
 
-    # ── Bias direccional sugerido ──────────────────────────────────────────
-    if "BULL" in regime:
-        bias = "Sesgo LONG (buscar entradas en pullbacks)"
-    elif "BEAR" in regime:
-        bias = "Sesgo SHORT (buscar entradas en rebotes)"
-    elif regime == "TRANSICIÓN":
-        bias = "Esperar confirmación del próximo timeframe"
-    else:
-        bias = "No operar tendencia — eventualmente operar rangos"
+    # ── Niveles ──
+    lv = build_levels(frames, price, ref_tf=ref_tf, asset_type=asset_type)
+    tol = lv["tolerance"]
+    sup, res = lv["nearest_support"], lv["nearest_resistance"]
+    at_level = lv["at_level"]
 
-    return {
-        "regime": regime,
-        "description": description,
-        "bias": bias,
-        "strength_score": bullish_count - bearish_count,  # -3 a +3
-    }
-
-
-# ── Sistema de scoring ponderado ──────────────────────────────────────────────
-
-def calculate_score(df: pd.DataFrame) -> dict:
-    """
-    Score ponderado v2.2 (max 16 puntos).
-    ADX < 25 = filtro obligatorio, no emite señal.
-    """
-    if len(df) < 3:
-        return {"score": 0, "max_score": MAX_SCORE, "conditions": {},
-                "market_trending": False, "adx": None, "di_pos": None, "di_neg": None,
-                "rsi6_oversold": False, "rsi6_overbought": False,
-                "bb_squeeze": False,
-                "divergence": {"bullish": False, "bearish": False},
-                "obv_divergence": {"bullish": False, "bearish": False},
-                "warnings": ["Datos insuficientes"]}
-
-    row      = df.iloc[-2]   # ultima vela CERRADA
-    prev_row = df.iloc[-3]
-    price    = row["close"]
-
-    conditions = {}
-    score = 0
-    warnings = []
-
-    # ── FILTRO OBLIGATORIO: ADX ───────────────────────────────────────────────
-    adx_value = row.get("ADX")
-    market_trending = bool(adx_value >= 25) if pd.notna(adx_value) else False
-    conditions["ADX > 25 (mercado en tendencia)"] = market_trending
-
-    if not market_trending:
-        warnings.append(
-            f"ADX {round(adx_value,1) if pd.notna(adx_value) else '?'} < 25 "
-            "— mercado lateral, señal poco confiable"
-        )
-
-    # ── CAPA 1: TENDENCIA (max 5 puntos) ─────────────────────────────────────
-
-    # EMA cruce 20/50 — 3 puntos (mas confiable)
-    ema_bull = price > row["EMA20"] and row["EMA20"] > row["EMA50"]
-    ema_bear = price < row["EMA20"] and row["EMA20"] < row["EMA50"]
-    conditions["EMA 20/50 alineadas (alcista)"] = ema_bull
-    conditions["EMA 20/50 alineadas (bajista)"] = ema_bear
-    score += 3 if ema_bull else -3 if ema_bear else 0
-
-    # Bollinger MB — 1 punto
-    bb_above = price > row["BB_MB"]
-    conditions["Precio > Bollinger MB"] = bb_above
-    score += 1 if bb_above else -1
-
-    # VWAP diario — 1 punto
-    if pd.notna(row.get("VWAP")):
-        vwap_above = price > row["VWAP"]
-        conditions["Precio > VWAP diario"] = vwap_above
-        score += 1 if vwap_above else -1
-
-    # BB Width — informativo, no suma puntos
-    bb_squeeze = False
-    if pd.notna(row.get("BB_WIDTH")):
-        recent_widths = df["BB_WIDTH"].tail(100).dropna()
-        if len(recent_widths) > 20:
-            p20 = recent_widths.quantile(0.20)
-            bb_squeeze = row["BB_WIDTH"] < p20
-    conditions["Bollinger Squeeze (señal proxima)"] = bb_squeeze
-
-    # ── CAPA 2: MOMENTUM (max 7 puntos) ──────────────────────────────────────
-
-    # MACD: posicion + aceleracion — 2 puntos
-    macd_bull = (
-        row["MACD"] > row["MACD_SIGNAL"]
-        and row["MACD_HIST"] > prev_row["MACD_HIST"]
-    )
-    macd_bear = (
-        row["MACD"] < row["MACD_SIGNAL"]
-        and row["MACD_HIST"] < prev_row["MACD_HIST"]
-    )
-    conditions["MACD bullish (linea > señal + acelerando)"] = macd_bull
-    conditions["MACD bearish (linea < señal + acelerando)"] = macd_bear
-    score += 2 if macd_bull else -2 if macd_bear else 0
-
-    # StochRSI — 1 punto
-    stoch_bull = False
-    stoch_bear = False
-    if pd.notna(row.get("STOCH_K")) and pd.notna(row.get("STOCH_D")):
-        stoch_bull = row["STOCH_K"] > row["STOCH_D"] and row["STOCH_K"] < 80
-        stoch_bear = row["STOCH_K"] < row["STOCH_D"] and row["STOCH_K"] > 20
-    conditions["StochRSI alcista (K>D, no sobrecompra)"] = stoch_bull
-    conditions["StochRSI bajista (K<D, no sobreventa)"] = stoch_bear
-    score += 1 if stoch_bull else -1 if stoch_bear else 0
-
-    # RSI20 nivel — 1 punto
-    rsi20_bull = pd.notna(row["RSI20"]) and row["RSI20"] > 55
-    rsi20_bear = pd.notna(row["RSI20"]) and row["RSI20"] < 45
-    conditions["RSI(20) > 55"] = rsi20_bull
-    conditions["RSI(20) < 45"] = rsi20_bear
-    score += 1 if rsi20_bull else -1 if rsi20_bear else 0
-
-    # Divergencias RSI — 3 puntos (muy alta confiabilidad)
-    div = detect_rsi_divergence(df)
-    conditions["Divergencia RSI alcista"] = div["bullish"]
-    conditions["Divergencia RSI bajista"] = div["bearish"]
-    if div["bullish"]:
-        score += 3
-    elif div["bearish"]:
-        score -= 3
-
-    # ── CAPA 3: VOLUMEN (max 4 puntos) ────────────────────────────────────────
-
-    # OBV vs MA20 — 1 punto (peso REDUCIDO cuando tendencia es muy fuerte)
-    # Razon: en bears fuertes el OBV puede mentir por short-covering
-    obv_bull = False
-    if pd.notna(row.get("OBV_MA20")):
-        obv_bull = row["OBV"] > row["OBV_MA20"]
-    conditions["OBV > MA20 (presion compradora)"] = obv_bull
-
-    # Si ADX > 40, el OBV pesa menos (la tendencia macro manda)
-    adx_for_weight = float(adx_value) if pd.notna(adx_value) else 0
-    obv_weight = 0.5 if adx_for_weight > 40 else 1.0
-    score += obv_weight if obv_bull else -obv_weight
-
-    # Divergencias OBV — 2 puntos (mas confiable que RSI por usar volumen real)
-    # Igual: reducido a 1 si ADX > 40 (tendencia macro debe pesar mas)
-    obv_div = detect_obv_divergence(df)
-    conditions["Divergencia OBV alcista (acumulacion)"] = obv_div["bullish"]
-    conditions["Divergencia OBV bajista (distribucion)"] = obv_div["bearish"]
-    div_weight = 1.0 if adx_for_weight > 40 else 2.0
-    if obv_div["bullish"]:
-        score += div_weight
-    elif obv_div["bearish"]:
-        score -= div_weight
-
-    # Volumen fuerte — 1 punto (solo premia, no penaliza)
-    vol_strong = False
-    if pd.notna(row.get("VOL_MA10")):
-        vol_strong = row["volume"] > row["VOL_MA10"] * 1.5
-    conditions["Volumen fuerte (> MA10 x 1.5)"] = vol_strong
-    score += 1 if vol_strong else 0
-
-    # RSI6 alertas especiales (no suman puntos)
-    rsi6_oversold   = pd.notna(row["RSI6"]) and row["RSI6"] < 25
-    rsi6_overbought = pd.notna(row["RSI6"]) and row["RSI6"] > 75
-
-    return {
-        "score": score,
-        "max_score": MAX_SCORE,
-        "conditions": conditions,
-        "market_trending": market_trending,
-        "adx": round(float(adx_value), 1) if pd.notna(adx_value) else None,
-        "di_pos": round(float(row["DI_POS"]), 1) if pd.notna(row.get("DI_POS")) else None,
-        "di_neg": round(float(row["DI_NEG"]), 1) if pd.notna(row.get("DI_NEG")) else None,
-        "rsi6_oversold": rsi6_oversold,
-        "rsi6_overbought": rsi6_overbought,
-        "bb_squeeze": bool(bb_squeeze),
-        "divergence": div,
-        "obv_divergence": obv_div,
-        "warnings": warnings,
-    }
-
-
-def get_adaptive_threshold(adx: float) -> int:
-    """
-    Umbral dinamico segun fuerza de tendencia (ADX).
-
-    Logica: cuando el mercado grita en una direccion, no necesitamos 9 puntos
-    para entrar. Cuando esta indeciso, somos mas estrictos.
-
-    - ADX > 40: tendencia extremadamente fuerte → umbral 7 (no perder el move)
-    - ADX 30-40: tendencia clara              → umbral 9 (base)
-    - ADX 20-30: tendencia debil               → umbral 10 (mas estricto)
-    - ADX < 20: lateral                        → umbral 12 (muy estricto)
-    """
-    if pd.isna(adx) or adx == 0:
-        return 12  # sin datos = maximo cuidado
-    if adx > 40:
-        return 7
-    if adx >= 30:
-        return 9
-    if adx >= 20:
-        return 10
-    return 12
-
-
-# ── Señal final (incluye confirmacion 1H y filtros multi-timeframe) ──────────
-
-def calculate_poc(df: pd.DataFrame, lookback: int = 100, bins: int = 24) -> dict:
-    """
-    Volume Profile simplificado: encuentra el POC (Point of Control) — el
-    precio donde se concentro mas volumen negociado en el periodo. A diferencia
-    de Fibonacci, tiene fundamento real: refleja donde esta comprometido el
-    capital, no una relacion geometrica. Sirve como zona de reaccion/iman.
-
-    Metodo: divide el rango de precios del periodo en 'bins' bandas, suma el
-    volumen de cada vela en la banda que contiene su precio de cierre, y
-    devuelve la banda con mas volumen (POC) + el rango de valores (VAH/VAL
-    aproximado como las bandas que contienen el 70% del volumen alrededor del POC).
-    """
-    d = df.tail(lookback)
-    if len(d) < 10:
-        return {}
-
-    lo, hi = d["low"].min(), d["high"].max()
-    if hi <= lo:
-        return {}
-
-    edges = np.linspace(lo, hi, bins + 1)
-    vol_by_bin = np.zeros(bins)
-    for _, row in d.iterrows():
-        idx = np.searchsorted(edges, row["close"], side="right") - 1
-        idx = min(max(idx, 0), bins - 1)
-        vol_by_bin[idx] += row["volume"]
-
-    poc_idx = int(np.argmax(vol_by_bin))
-    poc_price = (edges[poc_idx] + edges[poc_idx + 1]) / 2
-
-    # Value area aproximada: expandir desde el POC hasta cubrir ~70% del volumen
-    total_vol = vol_by_bin.sum()
-    if total_vol <= 0:
-        return {"poc": round(poc_price, 4)}
-    covered = vol_by_bin[poc_idx]
-    lo_i, hi_i = poc_idx, poc_idx
-    while covered / total_vol < 0.70 and (lo_i > 0 or hi_i < bins - 1):
-        left = vol_by_bin[lo_i - 1] if lo_i > 0 else -1
-        right = vol_by_bin[hi_i + 1] if hi_i < bins - 1 else -1
-        if left >= right:
-            lo_i -= 1; covered += max(left, 0)
+    # Ubicacion respecto de los niveles
+    near_sup = sup is not None and (price - sup["hi"]) <= 1.2 * tol
+    near_res = res is not None and (res["lo"] - price) <= 1.2 * tol
+    if at_level:
+        # El precio esta DENTRO de una zona: si esta sobre el centro y la ultima
+        # vela cerro sobre el, la zona actua de soporte (apoyo / retest); si no,
+        # de resistencia (techo que todavia no supero).
+        if price >= at_level["price"] and price_closed >= at_level["lo"]:
+            near_sup, at_role = True, "S"
         else:
-            hi_i += 1; covered += max(right, 0)
-
-    return {
-        "poc": round(poc_price, 4),
-        "vah": round(edges[hi_i + 1], 4),  # value area high
-        "val": round(edges[lo_i], 4),      # value area low
-    }
-
-
-def calculate_fibonacci(df: pd.DataFrame, lookback: int = 100) -> dict:
-    """
-    Retroceso y extension de Fibonacci sobre el ultimo swing (maximo/minimo)
-    del periodo. NOTA DE HONESTIDAD: Fibonacci tiene evidencia empirica debil
-    como generador de señales — funciona mas por profecia autocumplida (mucha
-    gente lo mira) que por logica de mercado. Se usa aca como REFERENCIA DE
-    NIVELES, con peso modesto en el score v2, no como señal fuerte por si sola.
-    """
-    d = df.tail(lookback)
-    if len(d) < 10:
-        return {}
-
-    hi_idx = d["high"].idxmax()
-    lo_idx = d["low"].idxmin()
-    hi_price = d.loc[hi_idx, "high"]
-    lo_price = d.loc[lo_idx, "low"]
-    if hi_price <= lo_price:
-        return {}
-
-    # Direccion del swing: si el minimo es mas reciente que el maximo, el
-    # movimiento dominante fue bajista (retrocedemos una caida, swing down);
-    # si el maximo es mas reciente, fue alcista (retrocedemos una subida).
-    swing_down = lo_idx > hi_idx  # el minimo ocurrio despues -> caida reciente
-    diff = hi_price - lo_price
-
-    if swing_down:
-        # Retrocesos hacia arriba desde el minimo (posible rebote)
-        levels = {f"{r}": round(lo_price + diff * r, 4) for r in [0.382, 0.5, 0.618, 0.786]}
-        extensions = {f"{r}": round(lo_price - diff * (r - 1), 4) for r in [1.272, 1.618]}
-        direction = "retroceso_alcista"
+            near_res, at_role = True, "R"
     else:
-        # Retrocesos hacia abajo desde el maximo (posible corrección)
-        levels = {f"{r}": round(hi_price - diff * r, 4) for r in [0.382, 0.5, 0.618, 0.786]}
-        extensions = {f"{r}": round(hi_price + diff * (r - 1), 4) for r in [1.272, 1.618]}
-        direction = "retroceso_bajista"
+        at_role = None
+    sup_zone = at_level if at_role == "S" else sup
+    res_zone = at_level if at_role == "R" else res
+    room_up = max(0.0, (res_zone["hi"] / price - 1) * 100) if res_zone else None
+    room_dn = max(0.0, (1 - sup_zone["lo"] / price) * 100) if sup_zone else None
 
-    return {
-        "direction": direction,
-        "swing_high": round(hi_price, 4),
-        "swing_low": round(lo_price, 4),
-        "retracement": levels,
-        "extension": extensions,
-    }
-
-
-MAX_SCORE_V2 = 12
-THRESHOLD_V2 = 5
-
-
-def calculate_score_v2(df_1h: pd.DataFrame, df_4h: pd.DataFrame, trend_1d: str) -> dict:
-    """
-    Score v2 — replica el metodo descripto por Agustin (Joven Inversor) en su
-    video de estrategia 2026. Cuatro componentes, en el orden que el describe:
-
-      1. RSI en 1H (sobrecompra/sobreventa 70/30) — su indicador mas usado
-      2. Divergencia RSI en 1H — la señal de agotamiento que el mas valora
-      3. POC (volumen por precio) — confluencia con la tendencia dominante
-      4. Fibonacci (retroceso) — nivel de referencia, peso modesto por evidencia debil
-      5. VWAP en 1H — gatillo de ruptura (breakout) para el timing de entrada
-
-    Max score 12. Es deliberadamente mas simple que el score v1 (17 indicadores)
-    porque el metodo original es asi: pocas herramientas, lectura de contexto.
-    """
-    conditions = {}
-    score = 0.0
-
-    if len(df_1h) < 30 or len(df_4h) < 30:
-        return {"score": 0, "max_score": MAX_SCORE_V2, "conditions": {},
-                "adx": 0, "poc": {}, "fib": {}}
-
-    row_1h = df_1h.iloc[-2]
-    current_price = row_1h["close"]
-
-    # ── 1. RSI 1H sobrecompra/sobreventa ──
-    rsi_1h = row_1h.get("RSI14")
-    if pd.notna(rsi_1h):
-        if rsi_1h < 30:
-            score += 3; conditions["RSI(1H) en sobreventa (<30)"] = True
-        elif rsi_1h > 70:
-            score -= 3; conditions["RSI(1H) en sobrecompra (>70)"] = True
-
-    # ── 2. Divergencia RSI en 1H ──
-    div_1h = detect_rsi_divergence(df_1h)
-    if div_1h.get("bullish"):
-        score += 3; conditions["Divergencia RSI(1H) alcista"] = True
-    elif div_1h.get("bearish"):
-        score -= 3; conditions["Divergencia RSI(1H) bajista"] = True
-
-    # ── 3. POC: confluencia con tendencia dominante ──
-    poc = calculate_poc(df_4h, lookback=100, bins=24)
-    if poc.get("poc") and current_price:
-        near_poc = abs(current_price - poc["poc"]) / current_price < 0.01
-        if near_poc:
-            if trend_1d == "ALCISTA":
-                score += 2; conditions["Precio en zona de POC, tendencia 1D alcista"] = True
-            elif trend_1d == "BAJISTA":
-                score -= 2; conditions["Precio en zona de POC, tendencia 1D bajista"] = True
-
-    # ── 4. Fibonacci: confluencia de nivel (peso modesto, evidencia debil) ──
-    fib = calculate_fibonacci(df_4h, lookback=100)
-    if fib.get("retracement") and current_price:
-        r618 = fib["retracement"].get("0.618")
-        r786 = fib["retracement"].get("0.786")
-        if r618 and r786:
-            lo_r, hi_r = min(r618, r786), max(r618, r786)
-            in_zone = lo_r <= current_price <= hi_r
-            if in_zone:
-                if fib["direction"] == "retroceso_alcista":
-                    score += 2; conditions["Precio en zona Fibonacci 0.618-0.786 (rebote esperado)"] = True
-                else:
-                    score -= 2; conditions["Precio en zona Fibonacci 0.618-0.786 (correccion esperada)"] = True
-
-    # ── 5. VWAP 1H: gatillo de ruptura ──
-    vwap_now = row_1h.get("VWAP")
-    vwap_prev = df_1h.iloc[-3].get("VWAP") if len(df_1h) >= 3 else None
-    price_prev = df_1h.iloc[-3].get("close") if len(df_1h) >= 3 else None
-    if pd.notna(vwap_now) and pd.notna(vwap_prev) and pd.notna(price_prev):
-        crossed_up = price_prev <= vwap_prev and current_price > vwap_now
-        crossed_down = price_prev >= vwap_prev and current_price < vwap_now
-        if crossed_up:
-            score += 2; conditions["Ruptura de VWAP(1H) al alza"] = True
-        elif crossed_down:
-            score -= 2; conditions["Ruptura de VWAP(1H) a la baja"] = True
-
-    adx_4h = df_4h.iloc[-2].get("ADX")
-    return {
-        "score": round(score, 1),
-        "max_score": MAX_SCORE_V2,
-        "conditions": conditions,
-        "adx": round(adx_4h, 1) if pd.notna(adx_4h) else 0,
-        "poc": poc,
-        "fib": fib,
-    }
-
-
-def get_signal_v2(score: float, trend_1d: str, adx: float) -> dict:
-    """
-    Señal v2: umbral fijo (a diferencia del adaptativo de v1, para mantener
-    la simplicidad del metodo original). Si la señal va contra la tendencia
-    1D, no se bloquea del todo (igual que el fix de v1) pero queda BAJA.
-    """
-    if abs(score) < THRESHOLD_V2:
-        return {"signal": "NEUTRAL", "confidence": "—",
-                "reason": f"Score insuficiente ({score}, umbral {THRESHOLD_V2})"}
-
-    raw = "LONG" if score > 0 else "SHORT"
-    aligned = (raw == "LONG" and trend_1d == "ALCISTA") or \
-              (raw == "SHORT" and trend_1d == "BAJISTA")
-
-    if abs(score) >= 8 and aligned:
-        confidence = "ALTA"
-    elif aligned:
-        confidence = "MEDIA"
+    if near_sup and not near_res:
+        position = "EN SOPORTE"
+    elif near_res and not near_sup:
+        position = "EN RESISTENCIA"
+    elif near_sup and near_res:
+        position = "RANGO ESTRECHO"
     else:
-        confidence = "BAJA"
+        position = "EN MEDIO DEL RANGO"
 
-    return {"signal": raw, "confidence": confidence, "reason": ""}
+    # ── Ruptura (breakout) en la ultima vela cerrada del marco de referencia ──
+    vol_ok = pd.notna(last_closed["VOL_MA20"]) and last_closed["volume"] > 1.3 * last_closed["VOL_MA20"]
+    prev2 = ref.iloc[-3]
+    breakout_up = breakout_dn = None
+    for r_ in lv["resistances"] + ([at_level] if at_level else []):
+        if r_ and prev2["close"] < r_["hi"] <= price_closed and r_["strength"] >= 25:
+            breakout_up = r_; break
+    for s_ in lv["supports"] + ([at_level] if at_level else []):
+        if s_ and prev2["close"] > s_["lo"] >= price_closed and s_["strength"] >= 25:
+            breakout_dn = s_; break
+
+    # ── Timing corto y agotamiento ──
+    timing = timing_state(frames.get("1h") if "1h" in frames else ref)
+    exh = exhaustion(ref, swings.get(ref_tf, []), trends[ref_tf]["label"])
+    rsi14 = float(last_closed["RSI14"]) if pd.notna(last_closed["RSI14"]) else 50.0
+    ref_struct = trends[ref_tf]["structure"]
+
+    # ── Funding (solo cripto) ──
+    funding = funding or {"available": False}
+    f_impact = funding.get("impact", "NEUTRAL") if funding.get("available") else "NEUTRAL"
+
+    # ── Deteccion de setup ──
+    setup, direction, reasons, warnings = None, None, [], []
+    bull_bias = bias >= 15
+    bear_bias = bias <= -15
+
+    if bull_bias and near_sup and sup_zone and timing["direction"] != "BAJISTA" and rsi14 < 70:
+        setup, direction = "PULLBACK", "LONG"
+        reasons.append(f"Tendencia {regime.lower()} y precio apoyado en soporte {_lab(sup_zone)} ({_fmt(sup_zone['price'])})")
+    elif breakout_up and bias >= -10 and (vol_ok or breakout_up["strength"] >= 50) and timing["direction"] != "BAJISTA":
+        setup, direction = "BREAKOUT", "LONG"
+        reasons.append(f"Ruptura de resistencia {_lab(breakout_up, True)} en {_fmt(breakout_up['price'])}" + (" con volumen" if vol_ok else ""))
+    elif allow_short and bear_bias and near_res and res_zone and timing["direction"] != "ALCISTA" and rsi14 > 30:
+        setup, direction = "PULLBACK", "SHORT"
+        reasons.append(f"Tendencia {regime.lower()} y precio rechazado en resistencia {_lab(res_zone, True)} ({_fmt(res_zone['price'])})")
+    elif allow_short and breakout_dn and bias <= 10 and (vol_ok or breakout_dn["strength"] >= 50) and timing["direction"] != "ALCISTA":
+        setup, direction = "BREAKOUT", "SHORT"
+        reasons.append(f"Perdida de soporte {_lab(breakout_dn)} en {_fmt(breakout_dn['price'])}" + (" con volumen" if vol_ok else ""))
+
+    # ── Stop / objetivos con niveles reales ──
+    plan = None
+    if direction:
+        entry = price
+        if direction == "LONG":
+            base = sup_zone if setup == "PULLBACK" else (breakout_up or sup_zone)
+            stop = (base["lo"] if base else entry) - 0.5 * atr
+            if entry - stop > 3.0 * atr:          # stop demasiado lejos -> usar ATR
+                stop = entry - 1.8 * atr
+            targets = [r_["price"] for r_ in lv["resistances"] if r_["price"] > entry + 0.5 * atr]
+            tp3_fallback = entry + 4.5 * atr
+        else:
+            base = res_zone if setup == "PULLBACK" else (breakout_dn or res_zone)
+            stop = (base["hi"] if base else entry) + 0.5 * atr
+            if stop - entry > 3.0 * atr:
+                stop = entry + 1.8 * atr
+            targets = [s_["price"] for s_ in lv["supports"] if s_["price"] < entry - 0.5 * atr]
+            tp3_fallback = entry - 4.5 * atr
+        risk = abs(entry - stop)
+        tps = targets[:3]
+        while len(tps) < 3:
+            # completar con extensiones de ATR si faltan niveles
+            last = tps[-1] if tps else entry
+            tps.append(last + (2.0 * atr if direction == "LONG" else -2.0 * atr))
+        rr1 = abs(tps[0] - entry) / risk if risk > 0 else 0
+        rr2 = abs(tps[1] - entry) / risk if risk > 0 else 0
+        risk_amount = capital * risk_pct
+        pos_usd = risk_amount / (risk / entry) if risk > 0 else 0
+        plan = {"direction": direction, "entry": round(entry, 6), "stop": round(stop, 6),
+                "tp1": round(tps[0], 6), "tp2": round(tps[1], 6), "tp3": round(tps[2], 6),
+                "risk_pct": round(risk / entry * 100, 2), "rr_tp1": round(rr1, 2), "rr_tp2": round(rr2, 2),
+                "risk_usd": round(risk_amount, 2), "position_usd": round(pos_usd, 2),
+                "units": round(pos_usd / entry, 6) if entry else 0,
+                "stop_basis": (base["sources"][0] if base and base.get("sources") else "ATR")}
+        # Rechazo por falta de espacio
+        if rr1 < 1.2:
+            warnings.append(f"Sin espacio: el primer objetivo ({_fmt(tps[0])}) queda a solo {rr1:.1f}R del riesgo")
+            setup, direction = None, None
+            plan["rejected"] = True
+
+    # ── Confianza ──
+    confidence = "—"
+    conf_pts = 0
+    if direction:
+        conf_pts += 2 if aligned else 1 if abs(bias) >= 35 else 0
+        zone = sup_zone if direction == "LONG" else res_zone
+        if setup == "PULLBACK" and zone:
+            conf_pts += 2 if zone["strength"] >= 60 else 1 if zone["strength"] >= 30 else 0
+        if setup == "BREAKOUT":
+            conf_pts += 2 if vol_ok else 0
+        want = "ALCISTA" if direction == "LONG" else "BAJISTA"
+        conf_pts += 1 if timing["direction"] == want else 0
+        conf_pts += 1 if plan and plan["rr_tp1"] >= 2 else 0
+        if exh["reversing"] and exh["direction"] != want:
+            conf_pts -= 2; warnings.append("Agotamiento detectado en contra del setup")
+        if (direction == "LONG" and f_impact == "BEARISH") or (direction == "SHORT" and f_impact == "BULLISH"):
+            conf_pts -= 1; warnings.append(f"Funding en contra: {funding.get('sentiment')}")
+        if (direction == "LONG" and f_impact == "BULLISH") or (direction == "SHORT" and f_impact == "BEARISH"):
+            conf_pts += 1
+        if ref_struct.get("choch") and ref_struct["choch"] != want:
+            conf_pts -= 2; warnings.append(f"Cambio de caracter {ref_struct['choch'].lower()} en {ref_tf.upper()}")
+        confidence = "ALTA" if conf_pts >= 5 else "MEDIA" if conf_pts >= 3 else "BAJA"
+
+    signal = direction or "NEUTRAL"
+
+    # ── Accion sugerida (lenguaje claro) ──
+    action, action_detail = _suggest_action(asset_type, allow_short, signal, setup, regime, bias,
+                                            position, sup_zone, res_zone, exh, ref_struct, rsi14,
+                                            room_up, room_dn, timing, confidence, warnings)
+
+    # ── Escenarios condicionales con niveles reales ──
+    scenarios = _scenarios(price, lv, regime, ref_tf)
+
+    # ── Resumen ──
+    summary = _summary(name, regime, bias, trends, weights, position, sup_zone, res_zone, exh,
+                       ref_struct, action, signal, confidence, funding)
+
+    return {
+        "name": name, "asset_type": asset_type, "price": round(price, 6),
+        "price_closed": round(price_closed, 6), "atr": round(atr, 6),
+        "signal": signal, "setup": setup, "confidence": confidence, "reasons": reasons,
+        "warnings": warnings + exh["signals"][:2] if exh["reversing"] else warnings,
+        "action": action, "action_detail": action_detail,
+        "regime": regime, "bias": bias, "aligned": aligned,
+        "trends": {tf: {"label": t["label"], "score": t["score"], "components": t["components"],
+                        "structure": t["structure"]["structure"], "bos": t["structure"].get("bos"),
+                        "choch": t["structure"].get("choch"), "adx": t.get("adx"),
+                        "last_high": t["structure"].get("last_high"), "last_low": t["structure"].get("last_low")}
+                   for tf, t in trends.items()},
+        "position": position, "room_up_pct": round(room_up, 2) if room_up is not None else None,
+        "room_down_pct": round(room_dn, 2) if room_dn is not None else None,
+        "levels": {"supports": lv["supports"], "resistances": lv["resistances"],
+                   "at_level": at_level, "key_levels": lv["key_levels"],
+                   "tolerance": lv["tolerance"], "volume_profile": lv["volume_profile"],
+                   "nearest_support": sup_zone, "nearest_resistance": res_zone},
+        "plan": plan, "timing": timing, "exhaustion": exh,
+        "breakout": {"up": breakout_up["price"] if breakout_up else None,
+                     "down": breakout_dn["price"] if breakout_dn else None, "volume_ok": bool(vol_ok)},
+        "indicators": {
+            "rsi6": round(float(last_closed["RSI6"]), 1) if pd.notna(last_closed["RSI6"]) else None,
+            "rsi14": round(rsi14, 1),
+            "macd_hist": round(float(last_closed["MACD_HIST"]), 5) if pd.notna(last_closed["MACD_HIST"]) else None,
+            "adx": trends[ref_tf].get("adx"), "di_pos": trends[ref_tf].get("di_pos"), "di_neg": trends[ref_tf].get("di_neg"),
+            "ema20": round(float(last_closed["EMA20"]), 6) if pd.notna(last_closed["EMA20"]) else None,
+            "ema50": round(float(last_closed["EMA50"]), 6) if pd.notna(last_closed["EMA50"]) else None,
+            "ema200": round(float(last_closed["EMA200"]), 6) if pd.notna(last_closed["EMA200"]) else None,
+            "bb_width": round(float(last_closed["BB_WIDTH"]), 5) if pd.notna(last_closed["BB_WIDTH"]) else None,
+            "bb_squeeze": _bb_squeeze(ref),
+            "obv_trend": "ALCISTA" if pd.notna(last_closed["OBV_MA20"]) and last_closed["OBV"] > last_closed["OBV_MA20"] else "BAJISTA",
+            "vwap": round(float(last_closed["VWAP"]), 6) if "VWAP" in last_closed and pd.notna(last_closed["VWAP"]) else None,
+            "volume_rel": round(float(last_closed["volume"] / last_closed["VOL_MA20"]), 2) if pd.notna(last_closed["VOL_MA20"]) and last_closed["VOL_MA20"] > 0 else None,
+        },
+        "funding": funding, "scenarios": scenarios, "summary": summary,
+        "ref_tf": ref_tf, "updated_at": _utcnow().strftime("%Y-%m-%d %H:%M UTC"), "error": None,
+    }
 
 
-def get_signal(score: float, trend_1h: str, trend_1d: str, trend_1w: str,
-               market_trending: bool, adx: float = 0) -> dict:
-    """
-    Logica de señal con 4 filtros: ADX, 1W, 1D, 1H.
-    Umbral adaptativo segun fuerza de tendencia.
-    """
-    reasons = []
-    threshold = get_adaptive_threshold(adx)
+def _bb_squeeze(df):
+    w = df["BB_WIDTH"].dropna().tail(120)
+    if len(w) < 30:
+        return False
+    return bool(w.iloc[-1] < w.quantile(0.2))
 
-    # Filtro 1: mercado en tendencia
-    if not market_trending:
-        return {"signal": "NEUTRAL",
-                "reason": "Mercado lateral (ADX < 25)",
-                "confidence": "—",
-                "threshold_used": threshold}
 
-    # Direccion segun score
-    if score >= threshold:
-        raw = "LONG"
-    elif score <= -threshold:
-        raw = "SHORT"
+def _suggest_action(asset_type, allow_short, signal, setup, regime, bias, position, sup, res,
+                    exh, struct, rsi14, room_up, room_dn, timing, confidence, warnings):
+    """Devuelve (accion_corta, explicacion) pensada para decidir."""
+    bull = bias >= 15
+    bear = bias <= -15
+    s = _fmt(sup["price"]) if sup else "—"
+    r = _fmt(res["price"]) if res else "—"
+
+    if signal == "LONG":
+        if setup == "PULLBACK":
+            return ("COMPRAR", f"Entrada a favor de tendencia en soporte {s}. Stop debajo del soporte, objetivo en {r}. Confianza {confidence.lower()}.")
+        return ("COMPRAR (ruptura)", f"Rompio resistencia. Entrar con stop bajo el nivel roto y objetivo en {r}. Si vuelve a caer bajo el nivel, salir: ruptura falsa. Confianza {confidence.lower()}.")
+    if signal == "SHORT":
+        if setup == "PULLBACK":
+            return ("VENDER / SHORT", f"Rechazo en resistencia {r} con tendencia bajista. Stop arriba de la resistencia, objetivo en {s}. Confianza {confidence.lower()}.")
+        return ("VENDER / SHORT (ruptura)", f"Perdio soporte. Short con stop sobre el nivel perdido y objetivo en {s}. Confianza {confidence.lower()}.")
+
+    # Sin setup: explicar que hacer segun contexto
+    if exh["reversing"]:
+        if exh["direction"] == "BAJISTA":
+            return ("PROTEGER GANANCIAS", f"Tendencia alcista con senales de agotamiento ({exh['score']}/100). Si tenes posicion, subir stop o tomar parcial. No comprar hasta que apoye en {s}.")
+        return ("ESPERAR EL PISO", f"Tendencia bajista con senales de agotamiento ({exh['score']}/100). Si tenes short, cubrir parcial. Para comprar esperar confirmacion arriba de {r}.")
+    if struct.get("choch") == "BAJISTA":
+        return ("REDUCIR", f"Perdio el ultimo minimo relevante: la estructura alcista se rompio. Reducir exposicion, no promediar. Soporte siguiente {s}.")
+    if struct.get("choch") == "ALCISTA":
+        return ("EMPEZAR A ACUMULAR", f"Supero el ultimo maximo relevante: primera senal objetiva de giro alcista. Entradas chicas, con stop bajo {s}.")
+    if bull:
+        if position == "EN RESISTENCIA":
+            return ("MANTENER, NO COMPRAR", f"Tendencia alcista pero el precio esta contra la resistencia {r}. Comprar aca es pagar caro: esperar ruptura con volumen o pullback a {s}.")
+        if position == "EN SOPORTE":
+            return ("VIGILAR ENTRADA", f"Precio en soporte {s} con tendencia alcista, pero el corto plazo todavia no gira (timing {timing['direction'].lower()}). Esperar vela de confirmacion.")
+        rr = f"{room_dn:.1f}% al soporte {s}, {room_up:.1f}% a la resistencia {r}" if room_up is not None and room_dn is not None else ""
+        return ("MANTENER", f"Tendencia alcista, precio en medio del rango ({rr}). Sin ventaja para entrar ahora: mejor esperar pullback a {s}.")
+    if bear:
+        if position == "EN SOPORTE":
+            return ("NO COMPRAR TODAVIA", f"Tendencia bajista apoyando en soporte {s}. Puede rebotar, pero contra la tendencia. Esperar que recupere {r} para pensar en comprar.")
+        if position == "EN RESISTENCIA":
+            return ("VENDER / NO ENTRAR", f"Tendencia bajista y precio en resistencia {r}: zona de venta, no de compra." + (" Short posible si el 1H confirma." if allow_short else ""))
+        return ("FUERA DEL MERCADO", f"Tendencia bajista, precio en medio del rango. Sin motivo para comprar; el siguiente soporte es {s}.")
+    if struct.get("structure") == "COMPRESION":
+        return ("ESPERAR RUPTURA", f"Rango que se comprime entre {s} y {r}: se viene un movimiento fuerte. Operar recien cuando rompa con volumen.")
+    return ("ESPERAR", f"Sin tendencia definida (sesgo {bias:+d}). Rango entre {s} y {r}: comprar solo en soporte con confirmacion, vender en resistencia.")
+
+
+def _scenarios(price, lv, regime, ref_tf):
+    out = []
+    res = lv["resistances"]
+    sup = lv["supports"]
+    if res:
+        r1 = res[0]
+        nxt = res[1]["price"] if len(res) > 1 else None
+        txt = f"Si rompe y sostiene sobre {_fmt(r1['price'])} ({_lab(r1, True)}, +{r1['distance_pct']:.1f}%)"
+        txt += f", el siguiente objetivo es {_fmt(nxt)}" if nxt else ", queda sin resistencias cercanas"
+        if "BEAR" in regime:
+            txt += "; en tendencia bajista, primero seria un rebote, no un giro, hasta que el 1D cambie"
+        out.append({"tipo": "alcista", "texto": txt + "."})
+    if sup:
+        s1 = sup[0]
+        nxt = sup[1]["price"] if len(sup) > 1 else None
+        txt = f"Si pierde {_fmt(s1['price'])} ({_lab(s1)}, {s1['distance_pct']:.1f}%)"
+        txt += f", el siguiente soporte es {_fmt(nxt)}" if nxt else ", no hay soporte cercano debajo"
+        if "BULL" in regime:
+            txt += "; en tendencia alcista seria una correccion mas profunda, no un giro, mientras respete el 1D"
+        out.append({"tipo": "bajista", "texto": txt + "."})
+    return out
+
+
+def _summary(name, regime, bias, trends, weights, position, sup, res, exh, struct, action, signal, confidence, funding):
+    tfl = " / ".join(f"{tf.upper()} {trends[tf]['label'].lower()}" for tf in weights if tf in trends)
+    f = []
+    f.append(f"{name}: regimen {regime} (sesgo {bias:+d}) — {tfl}.")
+    if struct.get("structure") in ("ALCISTA", "BAJISTA"):
+        f.append(f"La estructura del marco principal hace {'maximos y minimos crecientes' if struct['structure']=='ALCISTA' else 'maximos y minimos decrecientes'}" +
+                 (f", con ruptura {struct['bos'].lower()} confirmada" if struct.get("bos") else "") + ".")
+    elif struct.get("structure") == "COMPRESION":
+        f.append("La estructura se esta comprimiendo (maximos mas bajos y minimos mas altos): se acerca una ruptura.")
+    if sup and res:
+        f.append(f"Precio {position.lower()}: soporte {_lab(sup)} en {_fmt(sup['price'])} ({sup['distance_pct']:+.1f}%) y resistencia {_lab(res, True)} en {_fmt(res['price'])} ({res['distance_pct']:+.1f}%).")
+    if exh["reversing"]:
+        f.append(f"Atencion: agotamiento {exh['score']}/100, posible giro {exh['direction'].lower()}.")
+    if funding.get("available") and funding.get("impact") != "NEUTRAL":
+        f.append(f"Funding {funding['rate']:+.3f}%: {funding['sentiment'].lower()}.")
+    if signal != "NEUTRAL":
+        f.append(f"Senal {signal} ({confidence.lower()}). Accion: {action}.")
     else:
-        return {"signal": "NEUTRAL",
-                "reason": f"Score insuficiente ({score:.1f}, umbral {threshold} para ADX={adx:.1f})",
-                "confidence": "—",
-                "threshold_used": threshold}
+        f.append(f"Accion sugerida: {action}.")
+    return " ".join(f)
 
-    # Filtros 2+3: tendencia mayor (1W y 1D combinados)
-    # FIX (jul-2026): antes cualquiera de los dos en contra anulaba la señal.
-    # Eso bloqueo TODOS los LONG durante el rebote (el 1W tarda semanas en girar)
-    # y produjo 27 señales SHORT / 0 LONG con 26% de acierto. Ahora solo se anula
-    # si AMBOS marcos van en contra; si uno solo se opone, la señal pasa con
-    # confianza reducida (el filtro se vuelve gradual, no binario).
-    opposite = "BAJISTA" if raw == "LONG" else "ALCISTA"
-    w_against = trend_1w == opposite
-    d_against = trend_1d == opposite
-    if w_against and d_against:
-        return {"signal": "NEUTRAL",
-                "reason": f"Contra tendencia semanal Y diaria ({opposite})",
-                "confidence": "—",
-                "threshold_used": threshold}
-    counter_trend = w_against or d_against  # un marco en contra: permitir con cautela
 
-    # Filtro 4: confirmacion 1H
-    target = "ALCISTA" if raw == "LONG" else "BAJISTA"
-    confirms_1h = trend_1h == target
+# ── Correlacion con BTC (solo cripto) ────────────────────────────────────────
 
-    # Calculo de confianza (relativo al umbral usado)
-    abs_score = abs(score)
-    aligned_1d_1w = (trend_1d == trend_1w) and trend_1d in ("ALCISTA", "BAJISTA")
-
-    # Score excepcional (1.3× umbral) + alineacion + confirmacion = ALTA
-    if abs_score >= threshold * 1.3 and aligned_1d_1w and confirms_1h and not counter_trend:
-        confidence = "ALTA"
-    elif abs_score >= threshold and confirms_1h and not counter_trend:
-        confidence = "MEDIA"
-    else:
-        confidence = "BAJA"
-        if counter_trend:
-            reasons.append("Un marco mayor en contra — señal temprana de giro, tamaño reducido")
-        if not confirms_1h:
-            reasons.append("1H no confirma — esperar timing")
-
-    return {"signal": raw,
-            "reason": " | ".join(reasons) if reasons else "",
-            "confidence": confidence,
-            "threshold_used": threshold}
-
-
-# ── Señal de cierre (logica de ESTADO, no de cruce momentaneo) ───────────────
-
-def detect_trend_reversal(df: pd.DataFrame, current_regime: str) -> dict:
-    """
-    Detecta AGOTAMIENTO / posible giro de tendencia ANTES de que se confirme.
-
-    Motivacion: los datos mostraron que las señales SHORT envejecen mal (ganan
-    en 4H, pierden en 72H). Esto pasa porque la tendencia se agota y rebota.
-    Este detector busca señales tempranas de ese agotamiento.
-
-    Combina 5 factores objetivos (cada uno suma al reversal_score 0-100):
-      1. ADX cayendo desde un pico (la tendencia pierde fuerza motriz)  -> 25
-      2. Divergencia activa (RSI u OBV) contra la tendencia              -> 25
-      3. Cruce DI (DI+ y DI- se cruzan, cambio de dominancia)            -> 20
-      4. RSI(6) en extremo (sobrecompra en bull / sobreventa en bear)    -> 15
-      5. MACD histograma desacelerando (momentum perdiendo fuerza)       -> 15
-
-    Devuelve:
-      reversal_score: 0-100 (mayor = mas probable que la tendencia gire)
-      reversing: bool (score >= 50)
-      direction: hacia donde giraria ("ALCISTA"/"BAJISTA"/None)
-      signals: lista de razones detectadas
-    """
-    if len(df) < 20:
-        return {"reversal_score": 0, "reversing": False, "direction": None, "signals": []}
-
-    row = df.iloc[-2]
-    score = 0
-    signals = []
-
-    # Direccion de la tendencia actual (a partir del regimen)
-    is_bull = "BULL" in (current_regime or "")
-    is_bear = "BEAR" in (current_regime or "")
-
-    # ── Factor 1: ADX cayendo desde un pico ───────────────────────────────
-    # Si el ADX viene de un maximo reciente y ahora baja, la tendencia se enfria
-    adx_series = df["ADX"].dropna()
-    if len(adx_series) >= 6:
-        adx_now = adx_series.iloc[-2]
-        adx_peak = adx_series.iloc[-6:-1].max()
-        if pd.notna(adx_now) and pd.notna(adx_peak) and adx_peak > 25:
-            drop = adx_peak - adx_now
-            if drop >= 4:  # cayo al menos 4 puntos desde el pico (agotamiento temprano)
-                score += 25
-                signals.append(f"ADX cayendo desde pico ({adx_peak:.0f}->{adx_now:.0f}): tendencia perdiendo fuerza")
-
-    # ── Factor 2: Divergencia contra la tendencia ─────────────────────────
-    rsi_div = detect_rsi_divergence(df)
-    obv_div = detect_obv_divergence(df)
-    if is_bear and (rsi_div.get("bullish") or obv_div.get("bullish")):
-        score += 25
-        tipo = "RSI" if rsi_div.get("bullish") else "OBV"
-        signals.append(f"Divergencia {tipo} alcista en tendencia bajista: posible piso")
-    elif is_bull and (rsi_div.get("bearish") or obv_div.get("bearish")):
-        score += 25
-        tipo = "RSI" if rsi_div.get("bearish") else "OBV"
-        signals.append(f"Divergencia {tipo} bajista en tendencia alcista: posible techo")
-
-    # ── Factor 3: Cruce de DI (cambio de dominancia direccional) ──────────
-    if len(df) >= 4 and all(c in df.columns for c in ["DI_POS", "DI_NEG"]):
-        di_pos_now = df["DI_POS"].iloc[-2]
-        di_neg_now = df["DI_NEG"].iloc[-2]
-        di_pos_prev = df["DI_POS"].iloc[-4]
-        di_neg_prev = df["DI_NEG"].iloc[-4]
-        if all(pd.notna(x) for x in [di_pos_now, di_neg_now, di_pos_prev, di_neg_prev]):
-            # En bear: DI+ cruza por encima de DI- = giro alcista
-            if is_bear and di_pos_prev < di_neg_prev and di_pos_now > di_neg_now:
-                score += 20
-                signals.append("Cruce DI+ sobre DI-: presion compradora tomando control")
-            # En bull: DI- cruza por encima de DI+ = giro bajista
-            elif is_bull and di_neg_prev < di_pos_prev and di_neg_now > di_pos_now:
-                score += 20
-                signals.append("Cruce DI- sobre DI+: presion vendedora tomando control")
-
-    # ── Factor 4: RSI(6) en extremo ───────────────────────────────────────
-    rsi6 = row.get("RSI6")
-    if pd.notna(rsi6):
-        if is_bear and rsi6 < 20:
-            score += 15
-            signals.append(f"RSI(6) en sobreventa extrema ({rsi6:.0f}): caida madura, rebote probable")
-        elif is_bull and rsi6 > 80:
-            score += 15
-            signals.append(f"RSI(6) en sobrecompra extrema ({rsi6:.0f}): subida madura, correccion probable")
-
-    # ── Factor 5: MACD histograma desacelerando ───────────────────────────
-    if "MACD_HIST" in df.columns and len(df) >= 4:
-        h_now = df["MACD_HIST"].iloc[-2]
-        h_prev = df["MACD_HIST"].iloc[-3]
-        h_prev2 = df["MACD_HIST"].iloc[-4]
-        if all(pd.notna(x) for x in [h_now, h_prev, h_prev2]):
-            # En bear el hist es negativo; si se achica (sube hacia 0) = desacelera la caida
-            if is_bear and h_now < 0 and h_now > h_prev > h_prev2:
-                score += 15
-                signals.append("MACD histograma contrayendose: momentum bajista debilitando")
-            elif is_bull and h_now > 0 and h_now < h_prev < h_prev2:
-                score += 15
-                signals.append("MACD histograma contrayendose: momentum alcista debilitando")
-
-    # Direccion del giro potencial
-    direction = None
-    if score >= 50:
-        if is_bear:
-            direction = "ALCISTA"
-        elif is_bull:
-            direction = "BAJISTA"
-
-    return {
-        "reversal_score": score,
-        "reversing": score >= 50,
-        "direction": direction,
-        "signals": signals,
-    }
-
-
-def get_close_signal(df: pd.DataFrame, open_signal: str) -> dict:
-    """
-    Detecta condiciones de cierre evaluando ESTADO ACTUAL.
-    No requiere cruces exactos en la vela actual.
-    """
-    if len(df) < 3:
-        return {"should_close": False, "urgency": "BAJA", "reasons": []}
-
-    row   = df.iloc[-2]
-    price = row["close"]
-    reasons = []
-
-    if open_signal == "LONG":
-        # MACD bajo señal — estado bajista
-        if pd.notna(row["MACD"]) and pd.notna(row["MACD_SIGNAL"]):
-            if row["MACD"] < row["MACD_SIGNAL"]:
-                reasons.append("MACD por debajo de su señal")
-
-        # Precio bajo EMA20
-        if pd.notna(row["EMA20"]) and price < row["EMA20"]:
-            reasons.append("Precio por debajo de EMA20")
-
-        # Sobrecompra extrema = momento de tomar ganancia
-        if pd.notna(row["RSI6"]) and row["RSI6"] > 75:
-            reasons.append(f"RSI(6) sobrecompra ({round(row['RSI6'],1)})")
-
-        # ADX confirma direccion contraria
-        if (pd.notna(row.get("ADX")) and pd.notna(row.get("DI_NEG"))
-                and pd.notna(row.get("DI_POS"))):
-            if row["ADX"] > 25 and row["DI_NEG"] > row["DI_POS"]:
-                reasons.append("ADX confirma fuerza bajista")
-
-    elif open_signal == "SHORT":
-        if pd.notna(row["MACD"]) and pd.notna(row["MACD_SIGNAL"]):
-            if row["MACD"] > row["MACD_SIGNAL"]:
-                reasons.append("MACD por encima de su señal")
-
-        if pd.notna(row["EMA20"]) and price > row["EMA20"]:
-            reasons.append("Precio por encima de EMA20")
-
-        if pd.notna(row["RSI6"]) and row["RSI6"] < 25:
-            reasons.append(f"RSI(6) sobreventa ({round(row['RSI6'],1)})")
-
-        if (pd.notna(row.get("ADX")) and pd.notna(row.get("DI_NEG"))
-                and pd.notna(row.get("DI_POS"))):
-            if row["ADX"] > 25 and row["DI_POS"] > row["DI_NEG"]:
-                reasons.append("ADX confirma fuerza alcista")
-
-    n = len(reasons)
-    should_close = n >= 2
-    urgency = "ALTA" if n >= 3 else "MEDIA" if n == 2 else "BAJA"
-
-    return {"should_close": should_close, "urgency": urgency, "reasons": reasons}
-
-
-# ── Niveles ATR ──────────────────────────────────────────────────────────────
-
-def get_levels(df: pd.DataFrame) -> dict:
-    """Stops y TPs escalonados (perfil medio-agresivo)."""
-    last  = df.iloc[-2]
-    price = last["close"]
-    atr   = last["ATR"]
-
-    sl_mult, tp1_mult, tp2_mult, tp3_mult = 1.5, 2.5, 4.0, 6.0
-
-    return {
-        "stop_long":  round(price - sl_mult * atr, 4),
-        "tp1_long":   round(price + tp1_mult * atr, 4),
-        "tp2_long":   round(price + tp2_mult * atr, 4),
-        "tp3_long":   round(price + tp3_mult * atr, 4),
-        "stop_short": round(price + sl_mult * atr, 4),
-        "tp1_short":  round(price - tp1_mult * atr, 4),
-        "tp2_short":  round(price - tp2_mult * atr, 4),
-        "tp3_short":  round(price - tp3_mult * atr, 4),
-        "atr":        round(float(atr), 4),
-        "rr_ratio":   round(tp1_mult / sl_mult, 2),
-    }
-
-
-def calc_position_size(price: float, stop: float, capital: float = 10000,
-                       risk_pct: float = 0.025) -> dict:
-    """Tamaño de posicion para riesgo de 2.5% del capital."""
-    risk_amount   = capital * risk_pct
-    stop_distance = abs(price - stop) / price
-    position_size = risk_amount / stop_distance if stop_distance > 0 else 0
-    contracts     = position_size / price if price > 0 else 0
-    return {
-        "risk_amount":   round(risk_amount, 2),
-        "stop_distance": round(stop_distance * 100, 2),
-        "position_usd":  round(position_size, 2),
-        "contracts":     round(contracts, 4),
-    }
-
-
-# ── Analisis completo ─────────────────────────────────────────────────────────
-
-def detect_short_term_setup(df_1h: pd.DataFrame, trend_1d: str, trend_1w: str,
-                            pivots: dict, current_price: float) -> dict:
-    """
-    Detecta el TIMING de corto plazo (1H) dentro del contexto del marco grande.
-
-    El problema que resuelve: el bot opera mirando el marco grande (4H/1D/1W),
-    asi que cuando el precio rebota en 1H dentro de una tendencia bajista mayor,
-    NO lo detecta — y ese rebote es justo una oportunidad de entrada/salida.
-
-    Clasifica la situacion de corto plazo en:
-      - REBOTE: el 1H gira EN CONTRA del marco grande (pullback aprovechable)
-      - CONTINUACION: el 1H confirma el marco grande (entrada a favor de tendencia)
-      - NEUTRO: el 1H no da señal clara de timing
-
-    Devuelve tambien si esta "en zona" (cerca de soporte/resistencia), que es
-    donde un rebote tiene mas sentido.
-    """
-    if df_1h is None or len(df_1h) < 30:
-        return {"setup": "NEUTRO", "tipo": None, "en_zona": False,
-                "direction_1h": None, "detail": "", "strength": 0}
-
-    row = df_1h.iloc[-2]
-
-    # Direccion del marco grande (contexto)
-    big_bull = "ALCISTA" in (trend_1w or "") or "ALCISTA" in (trend_1d or "")
-    big_bear = "BAJISTA" in (trend_1w or "") or "BAJISTA" in (trend_1d or "")
-
-    # ── Direccion del 1H por momentum (no solo tendencia: queremos el GIRO) ──
-    rsi6 = row.get("RSI6")
-    macd_hist = row.get("MACD_HIST")
-    ema20 = row.get("EMA20")
-
-    # Señales de impulso alcista de corto plazo
-    bull_1h = 0
-    bear_1h = 0
-    if pd.notna(rsi6):
-        if rsi6 > 55: bull_1h += 1
-        elif rsi6 < 45: bear_1h += 1
-    if pd.notna(macd_hist):
-        # comparar con la barra previa para ver direccion del histograma
-        if len(df_1h) >= 3:
-            prev_h = df_1h.iloc[-3].get("MACD_HIST")
-            if pd.notna(prev_h):
-                if macd_hist > prev_h: bull_1h += 1
-                elif macd_hist < prev_h: bear_1h += 1
-    if pd.notna(ema20) and current_price:
-        if current_price > ema20: bull_1h += 1
-        elif current_price < ema20: bear_1h += 1
-
-    if bull_1h > bear_1h:
-        dir_1h = "ALCISTA"
-    elif bear_1h > bull_1h:
-        dir_1h = "BAJISTA"
-    else:
-        dir_1h = "LATERAL"
-    strength = abs(bull_1h - bear_1h)  # 0 a 3
-
-    # ── En zona: cerca de un pivot (soporte/resistencia) ──
-    en_zona = False
-    zona_tipo = None
-    if pivots and current_price:
-        for key, label in [("s1", "soporte"), ("s2", "soporte"),
-                           ("r1", "resistencia"), ("r2", "resistencia"),
-                           ("pivot", "pivote")]:
-            lvl = pivots.get(key)
-            if lvl and abs(current_price - lvl) / current_price < 0.012:  # dentro de 1.2%
-                en_zona = True
-                zona_tipo = label
-                break
-
-    # ── Clasificacion del setup ──
-    setup = "NEUTRO"
-    tipo = None
-    detail = ""
-
-    if big_bear and dir_1h == "ALCISTA" and strength >= 2:
-        setup = "REBOTE"
-        tipo = "rebote alcista en tendencia bajista"
-        detail = "El fondo es bajista pero el 1H rebota. Oportunidad de LONG corto " + \
-                 ("(en zona de soporte)" if en_zona and zona_tipo=="soporte" else "(vigilar, sin confirmacion de nivel)")
-    elif big_bull and dir_1h == "BAJISTA" and strength >= 2:
-        setup = "REBOTE"
-        tipo = "pullback bajista en tendencia alcista"
-        detail = "El fondo es alcista pero el 1H corrige. Oportunidad de SHORT corto " + \
-                 ("(en zona de resistencia)" if en_zona and zona_tipo=="resistencia" else "(vigilar, sin confirmacion de nivel)")
-    elif big_bear and dir_1h == "BAJISTA" and strength >= 2:
-        setup = "CONTINUACION"
-        tipo = "continuacion bajista"
-        detail = "El 1H confirma la tendencia bajista mayor. Entrada SHORT a favor de tendencia."
-    elif big_bull and dir_1h == "ALCISTA" and strength >= 2:
-        setup = "CONTINUACION"
-        tipo = "continuacion alcista"
-        detail = "El 1H confirma la tendencia alcista mayor. Entrada LONG a favor de tendencia."
-
-    return {
-        "setup": setup,           # REBOTE / CONTINUACION / NEUTRO
-        "tipo": tipo,
-        "direction_1h": dir_1h,   # hacia donde se mueve el corto plazo
-        "strength": strength,     # 0-3, cuantas señales de 1H alinean
-        "en_zona": en_zona,
-        "zona_tipo": zona_tipo,
-        "detail": detail,
-    }
-
-
-def analyze(name: str, symbol: str, main_tf: str = "4h") -> dict:
-    """
-    Analiza un activo. Por defecto el marco principal es 4H (sobre el que se
-    calcula score, señal, niveles y pivots). main_tf puede ser '1h', '4h' o '1d'
-    para recalcular en otro marco — esto es SOLO para la vista del dashboard;
-    el registro de señales y el paper trading siempre usan 4H.
-    """
-    try:
-        df_1h = fetch_candles(symbol, "1h", limit=200)
-        time.sleep(0.5)
-        df_4h = fetch_candles(symbol, "4h", limit=300)
-        time.sleep(0.5)
-        df_1d = fetch_candles(symbol, "1d", limit=300)
-        time.sleep(0.5)
-        df_1w = fetch_candles(symbol, "1w", limit=100)
-
-        df_1h = calculate_indicators(df_1h)
-        df_4h = calculate_indicators(df_4h)
-        df_1d = calculate_indicators(df_1d)
-        df_1w = calculate_indicators(df_1w)
-
-        # VWAP solo tiene sentido en 4H y menores
-        df_4h = add_daily_vwap(df_4h)
-        df_1h = add_daily_vwap(df_1h)
-
-        # ── Marco principal: el que se usa para score/señal/niveles/pivots ──
-        # Default 4H. El selector del dashboard puede pedir 1h o 1d para mirar.
-        df_main = {"1h": df_1h, "4h": df_4h, "1d": df_1d}.get(main_tf, df_4h)
-
-        trend_1h = get_trend(df_1h.iloc[-2])
-        trend_1d = get_trend(df_1d.iloc[-2])
-        trend_1w = get_trend(df_1w.iloc[-2])
-
-        score_data = calculate_score(df_main)
-        adx_val = score_data["adx"] or 0
-
-        # Funding rate (Binance) - sentimiento de perpetuos
-        funding = fetch_funding_rate(name)
-
-        # Aplicar ajuste de funding al score si esta disponible
-        if funding.get("available") and funding.get("score_adj"):
-            score_data["score"] += funding["score_adj"]
-            # Marcar la condicion para visibilidad
-            if funding["score_adj"] > 0:
-                score_data["conditions"]["Funding bajista extremo (sobreventa emocional)"] = True
-            else:
-                score_data["conditions"]["Funding alcista extremo (sobrecompra emocional)"] = True
-
-        signal_data = get_signal(
-            score_data["score"], trend_1h, trend_1d, trend_1w,
-            score_data["market_trending"], adx_val
-        )
-
-        # Régimen del mercado (diagnóstico independiente de la señal)
-        regime_data = get_regime(trend_1w, trend_1d, trend_1h, adx_val)
-
-        levels = get_levels(df_main)
-        pivots = calculate_pivots(df_main)
-        last   = df_main.iloc[-2]
-        price  = round(float(last["close"]), 4)
-
-        close_long  = get_close_signal(df_main, "LONG")
-        close_short = get_close_signal(df_main, "SHORT")
-        reversal = detect_trend_reversal(df_main, regime_data["regime"])
-        short_setup = detect_short_term_setup(df_1h, trend_1d, trend_1w, pivots, df_main.iloc[-2]["close"])
-
-        # ── V2: metodo alternativo (Agustin/Joven Inversor) — corre EN PARALELO ──
-        # No afecta score/signal/regimen de v1. Solo para comparar acertividad.
-        score_v2_data = calculate_score_v2(df_1h, df_4h, trend_1d)
-        signal_v2_data = get_signal_v2(score_v2_data["score"], trend_1d, score_v2_data["adx"])
-        v2 = {
-            "score": score_v2_data["score"],
-            "max_score": score_v2_data["max_score"],
-            "conditions": score_v2_data["conditions"],
-            "signal": signal_v2_data["signal"],
-            "confidence": signal_v2_data["confidence"],
-            "poc": score_v2_data["poc"],
-            "fib": score_v2_data["fib"],
-        }
-
-        target_for_signal = "ALCISTA" if "LONG" in signal_data["signal"] else "BAJISTA" if "SHORT" in signal_data["signal"] else None
-        confirm_1h = (trend_1h == target_for_signal) if target_for_signal else False
-
-        return {
-            "name": name,
-            "symbol": symbol,
-            "price": price,
-            "score": round(score_data["score"], 1),
-            "max_score": score_data["max_score"],
-            "signal": signal_data["signal"],
-            "signal_reason": signal_data["reason"],
-            "confidence": signal_data["confidence"],
-            "threshold_used": signal_data.get("threshold_used", SIGNAL_THRESHOLD),
-            "regime": regime_data["regime"],
-            "regime_description": regime_data["description"],
-            "regime_bias": regime_data["bias"],
-            "regime_strength": regime_data["strength_score"],
-            "trend_1h": trend_1h,
-            "trend_1d": trend_1d,
-            "trend_1w": trend_1w,
-            "confirm_1h": confirm_1h,
-            "market_trending": score_data["market_trending"],
-            "adx": score_data["adx"],
-            "di_pos": score_data["di_pos"],
-            "di_neg": score_data["di_neg"],
-            "conditions": score_data["conditions"],
-            "divergence": score_data["divergence"],
-            "obv_divergence": score_data["obv_divergence"],
-            "bb_squeeze": score_data["bb_squeeze"],
-            "warnings": score_data["warnings"],
-            "funding": funding,
-            "rsi6":  round(float(last["RSI6"]), 1)  if pd.notna(last["RSI6"])  else None,
-            "rsi14": round(float(last["RSI14"]), 1) if pd.notna(last["RSI14"]) else None,
-            "rsi20": round(float(last["RSI20"]), 1) if pd.notna(last["RSI20"]) else None,
-            "rsi6_oversold": score_data["rsi6_oversold"],
-            "rsi6_overbought": score_data["rsi6_overbought"],
-            "macd":      round(float(last["MACD"]), 4)      if pd.notna(last["MACD"]) else None,
-            "macd_hist": round(float(last["MACD_HIST"]), 4) if pd.notna(last["MACD_HIST"]) else None,
-            "ema20":     round(float(last["EMA20"]), 4)     if pd.notna(last["EMA20"]) else None,
-            "ema50":     round(float(last["EMA50"]), 4)     if pd.notna(last["EMA50"]) else None,
-            "bb_up":     round(float(last["BB_UP"]), 4)     if pd.notna(last["BB_UP"]) else None,
-            "bb_mb":     round(float(last["BB_MB"]), 4)     if pd.notna(last["BB_MB"]) else None,
-            "bb_dn":     round(float(last["BB_DN"]), 4)     if pd.notna(last["BB_DN"]) else None,
-            "bb_width":  round(float(last["BB_WIDTH"]), 4)  if pd.notna(last["BB_WIDTH"]) else None,
-            "obv_trend": "ALCISTA" if (pd.notna(last.get("OBV_MA20")) and last["OBV"] > last["OBV_MA20"])
-                         else "BAJISTA" if pd.notna(last.get("OBV_MA20")) else "—",
-            "vwap":      round(float(last["VWAP"]), 4) if pd.notna(last.get("VWAP")) else None,
-            "levels":    levels,
-            "pivots":    pivots,
-            "close_long":  close_long,
-            "close_short": close_short,
-            "reversal":    reversal,
-            "short_setup": short_setup,
-            "v2":          v2,
-            "updated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
-            "error": None,
-        }
-
-    except Exception as e:
-        return {"name": name, "symbol": symbol, "error": str(e)}
-
-
-def apply_btc_correlation(results: list) -> list:
-    """
-    Filtro post-analisis: si BTC esta en bear/bull fuerte, ajusta las señales
-    de altcoins porque historicamente todos los altcoins siguen a BTC.
-
-    - BTC en SHORT con confianza ALTA → bloquea LONGs en alts (cambia a NEUTRAL)
-    - BTC en LONG con confianza ALTA  → bloquea SHORTs en alts
-    - BTC en regimen BEAR FUERTE      → degrada confianza de LONGs alt
-    - BTC en regimen BULL FUERTE      → degrada confianza de SHORTs alt
-    """
+def apply_btc_filter(results: list) -> list:
     btc = next((r for r in results if r.get("name") == "BTC" and not r.get("error")), None)
     if not btc:
-        return results  # sin BTC, no aplicamos filtro
-
-    btc_signal = btc.get("signal", "NEUTRAL")
-    btc_conf   = btc.get("confidence", "—")
-    btc_regime = btc.get("regime", "LATERAL")
-
+        return results
     for r in results:
-        if r.get("name") == "BTC" or r.get("error"):
+        if r.get("error") or r["name"] == "BTC":
             continue
-
-        # Caso 1: bloqueo total — BTC señal fuerte contra señal de altcoin
-        if "SHORT" in btc_signal and btc_conf in ("ALTA", "MEDIA") and "LONG" in r["signal"]:
-            r["btc_filter_applied"] = True
-            r["btc_filter_reason"] = f"BTC en SHORT ({btc_conf}) — alts no rompen contra BTC"
-            r["signal_original"] = r["signal"]
-            r["confidence_original"] = r["confidence"]
-            r["signal"] = "NEUTRAL"
-            r["confidence"] = "—"
-            r["signal_reason"] = (r.get("signal_reason", "") + f" | {r['btc_filter_reason']}").strip(" |")
-            continue
-
-        if "LONG" in btc_signal and btc_conf in ("ALTA", "MEDIA") and "SHORT" in r["signal"]:
-            r["btc_filter_applied"] = True
-            r["btc_filter_reason"] = f"BTC en LONG ({btc_conf}) — alts no rompen contra BTC"
-            r["signal_original"] = r["signal"]
-            r["confidence_original"] = r["confidence"]
-            r["signal"] = "NEUTRAL"
-            r["confidence"] = "—"
-            r["signal_reason"] = (r.get("signal_reason", "") + f" | {r['btc_filter_reason']}").strip(" |")
-            continue
-
-        # Caso 2: degradacion de confianza — BTC regimen contrario a la señal del alt
-        if "BEAR FUERTE" in btc_regime and "LONG" in r["signal"]:
-            if r["confidence"] == "ALTA":
-                r["confidence"] = "MEDIA"
-            elif r["confidence"] == "MEDIA":
-                r["confidence"] = "BAJA"
-            r["btc_filter_applied"] = True
-            r["btc_filter_reason"] = "BTC en bear fuerte — confianza degradada"
-
-        if "BULL FUERTE" in btc_regime and "SHORT" in r["signal"]:
-            if r["confidence"] == "ALTA":
-                r["confidence"] = "MEDIA"
-            elif r["confidence"] == "MEDIA":
-                r["confidence"] = "BAJA"
-            r["btc_filter_applied"] = True
-            r["btc_filter_reason"] = "BTC en bull fuerte — confianza degradada"
-
+        if btc["bias"] <= -35 and r["signal"] == "LONG" and r["confidence"] != "BAJA":
+            r["confidence"] = "BAJA"; r["warnings"].append("BTC en tendencia bajista: los alts rara vez suben solos")
+        if btc["bias"] >= 35 and r["signal"] == "SHORT" and r["confidence"] != "BAJA":
+            r["confidence"] = "BAJA"; r["warnings"].append("BTC en tendencia alcista: shorts en alts con poco recorrido")
     return results
-
-
-def build_scenarios(r: dict) -> dict:
-    """
-    Genera lectura por capas (jerarquia multi-timeframe) + escenarios
-    condicionales con niveles reales + que timeframe vigilar.
-
-    Principio: el marco largo manda (fondo), el corto da timing. Un rebote 1H
-    dentro de un 1W bajista es una oscilacion subordinada, no un cambio de tendencia.
-
-    NO es prediccion: son condiciones determinadas por los niveles que el
-    mercado ya marco. Si pasa X (que el precio rompa un nivel real), entonces Y.
-    """
-    if r.get("error"):
-        return None
-
-    price = r.get("price")
-    if price is None:
-        return None
-
-    t1w = r.get("trend_1w", "LATERAL")
-    t1d = r.get("trend_1d", "LATERAL")
-    t1h = r.get("trend_1h", "LATERAL")
-    regime = r.get("regime", "")
-
-    # ── Capas (jerarquia) ─────────────────────────────────────────────────
-    def label(tf):
-        return {"ALCISTA": "alcista", "BAJISTA": "bajista", "LATERAL": "lateral"}.get(tf, "—")
-
-    layers = {
-        "fondo":      {"tf": "1W", "trend": label(t1w), "rol": "la marea grande, marca la dirección dominante"},
-        "estructura": {"tf": "1D", "trend": label(t1d), "rol": "el medio plazo, confirma o frena al fondo"},
-        "timing":     {"tf": "1H", "trend": label(t1h), "rol": "el corto plazo, da el momento de entrada"},
-    }
-
-    # ── Interpretacion de la jerarquia ────────────────────────────────────
-    interpretacion = ""
-    if t1w == "BAJISTA" and t1h == "ALCISTA":
-        if t1d == "BAJISTA":
-            interpretacion = ("El fondo es claramente bajista y el rebote de corto plazo va contra esa marea: "
-                              "lo más probable es que sea una oscilación temporal (rebote técnico) dentro de la caída mayor, "
-                              "no un cambio de dirección.")
-        else:
-            interpretacion = ("Fondo bajista con un rebote de corto plazo en curso. Mientras el medio plazo (1D) no gire alcista, "
-                              "el rebote sigue siendo subordinado a la tendencia bajista mayor.")
-    elif t1w == "ALCISTA" and t1h == "BAJISTA":
-        if t1d == "ALCISTA":
-            interpretacion = ("El fondo es claramente alcista y la baja de corto plazo va contra esa marea: "
-                              "lo más probable es que sea una corrección temporal dentro de la subida mayor, no un cambio de dirección.")
-        else:
-            interpretacion = ("Fondo alcista con una corrección de corto plazo en curso. Mientras el medio plazo (1D) no gire bajista, "
-                              "la corrección sigue subordinada a la tendencia alcista mayor.")
-    elif t1w == t1d == t1h and t1w in ("ALCISTA", "BAJISTA"):
-        dir_txt = "alcista" if t1w == "ALCISTA" else "bajista"
-        interpretacion = (f"Las tres capas están alineadas en dirección {dir_txt}: es la situación de mayor convicción, "
-                          f"el corto plazo confirma la tendencia de fondo.")
-    elif t1w == "LATERAL" and t1d == "LATERAL":
-        interpretacion = ("El fondo y el medio plazo están laterales: el mercado no tiene tendencia dominante. "
-                          "Los movimientos de corto plazo (1H) son ruido dentro de un rango hasta que el 1D defina dirección.")
-    else:
-        interpretacion = ("Las capas no están alineadas: el mercado está en transición. "
-                          "Conviene esperar a que el medio plazo (1D) defina hacia dónde se inclina antes de operar con la tendencia.")
-
-    # ── Escenarios condicionales con niveles reales ───────────────────────
-    # Junto todos los niveles relevantes y ubico el inmediato arriba/abajo
-    niveles = []
-    def add_level(val, nombre):
-        if val is not None and val > 0:
-            niveles.append((float(val), nombre))
-
-    piv = r.get("pivots", {})
-    add_level(r.get("ema20"), "EMA20")
-    add_level(r.get("ema50"), "EMA50")
-    add_level(r.get("vwap"), "VWAP")
-    add_level(piv.get("r1"), "pivot R1")
-    add_level(piv.get("r2"), "pivot R2")
-    add_level(piv.get("s1"), "pivot S1")
-    add_level(piv.get("s2"), "pivot S2")
-    add_level(r.get("bb_up"), "banda superior Bollinger")
-    add_level(r.get("bb_dn"), "banda inferior Bollinger")
-
-    arriba = sorted([n for n in niveles if n[0] > price * 1.0015], key=lambda x: x[0])
-    abajo = sorted([n for n in niveles if n[0] < price * 0.9985], key=lambda x: x[0], reverse=True)
-
-    def fmt(v):
-        return f"${v:,.2f}" if v >= 10 else f"${v:,.4f}"
-
-    escenarios = []
-
-    # Escenario alcista (ruptura del nivel inmediato superior)
-    if arriba:
-        nivel_val, nivel_nom = arriba[0]
-        dist = (nivel_val / price - 1) * 100
-        if t1w == "BAJISTA" or t1d == "BAJISTA":
-            consecuencia = ("el rebote ganaría fuerza y habría que ver si contagia al 1D para girarlo alcista — "
-                            "recién ahí el cambio de tendencia sería real, no solo un rebote")
-        elif t1w == "ALCISTA":
-            consecuencia = "la tendencia alcista de fondo se reforzaría y el avance tendría continuidad"
-        else:
-            consecuencia = "el mercado intentaría definir dirección al alza desde el rango actual"
-        escenarios.append({
-            "tipo": "alcista",
-            "texto": f"Si rompe y sostiene arriba de {fmt(nivel_val)} ({nivel_nom}, +{dist:.1f}%), {consecuencia}.",
-        })
-
-    # Escenario bajista (perdida del nivel inmediato inferior)
-    if abajo:
-        nivel_val, nivel_nom = abajo[0]
-        dist = (1 - nivel_val / price) * 100
-        if t1w == "ALCISTA" or t1d == "ALCISTA":
-            consecuencia = ("la corrección se profundizaría y habría que ver si contagia al 1D para girarlo bajista — "
-                            "recién ahí el cambio de tendencia sería real, no solo una corrección")
-        elif t1w == "BAJISTA":
-            consecuencia = "la tendencia bajista de fondo retomaría el control y la caída tendría continuidad"
-        else:
-            consecuencia = "el mercado intentaría definir dirección a la baja desde el rango actual"
-        escenarios.append({
-            "tipo": "bajista",
-            "texto": f"Si pierde {fmt(nivel_val)} ({nivel_nom}, -{dist:.1f}%), {consecuencia}.",
-        })
-
-    # ── Que timeframe vigilar ─────────────────────────────────────────────
-    if t1w == "BAJISTA" and t1h == "ALCISTA":
-        vigilar = ("Vigilá el 1D: es la bisagra. Si el 1D pasa de lateral/bajista a alcista, el rebote deja de ser "
-                   "oscilación y empieza a ser cambio de tendencia real.")
-    elif t1w == "ALCISTA" and t1h == "BAJISTA":
-        vigilar = ("Vigilá el 1D: es la bisagra. Si el 1D pasa de lateral/alcista a bajista, la corrección deja de ser "
-                   "temporal y empieza a ser cambio de tendencia real.")
-    elif t1w == t1d == t1h and t1w in ("ALCISTA", "BAJISTA"):
-        vigilar = ("Las tres capas ya están alineadas. Vigilá el 1H para timing de entrada y el ADX: "
-                   "si el ADX baja, la tendencia pierde fuerza.")
-    else:
-        vigilar = ("Vigilá el 1D: mientras siga lateral, el mercado no tiene dirección dominante y los movimientos "
-                   "de 1H son ruido dentro del rango.")
-
-    return {
-        "layers": layers,
-        "interpretacion": interpretacion,
-        "escenarios": escenarios,
-        "vigilar": vigilar,
-    }
-
-
-def build_asset_summary(r: dict) -> str:
-    """
-    Genera un resumen en lenguaje claro (2-3 frases) interpretando los
-    indicadores que ya tenemos. Es traduccion determinista, NO prediccion.
-
-    Estructura: [diagnostico de regimen] + [que lo confirma/contradice] +
-                [matiz accionable o de cautela].
-    """
-    if r.get("error"):
-        return "Sin datos suficientes para este activo."
-
-    regime = r.get("regime", "")
-    score = r.get("score", 0)
-    signal = r.get("signal", "NEUTRAL")
-    rsi6 = r.get("rsi6")
-    obv = r.get("obv_trend", "")
-    t1w, t1d, t1h = r.get("trend_1w"), r.get("trend_1d"), r.get("trend_1h")
-    bb_squeeze = r.get("bb_squeeze", False)
-    funding = r.get("funding", {})
-    obv_div = r.get("obv_divergence", {})
-    rsi_div = r.get("divergence", {})
-
-    frases = []
-
-    # ── Frase 1: diagnostico del regimen ──────────────────────────────────
-    if "BULL FUERTE" in regime:
-        frases.append("Tendencia alcista fuerte y alineada en todos los marcos temporales.")
-    elif "BULL" in regime:
-        frases.append("Mercado en tendencia alcista, con sesgo comprador predominante.")
-    elif "BEAR FUERTE" in regime:
-        frases.append("Tendencia bajista fuerte y alineada en todos los marcos temporales.")
-    elif "BEAR" in regime:
-        frases.append("Mercado en tendencia bajista, con sesgo vendedor predominante.")
-    elif "TRANSICI" in regime:
-        # Detallar la transicion segun los timeframes
-        if t1w == "BAJISTA" and t1h == "ALCISTA":
-            frases.append("Estructura bajista de fondo con un rebote en curso en el corto plazo.")
-        elif t1w == "ALCISTA" and t1h == "BAJISTA":
-            frases.append("Estructura alcista de fondo con una corrección en curso en el corto plazo.")
-        else:
-            frases.append("Mercado en transición: los marcos temporales no están alineados.")
-    elif "LATERAL ESTRICTO" in regime:
-        frases.append("Mercado sin tendencia, rangeando con baja fuerza direccional.")
-    else:
-        frases.append("Mercado lateral, sin convicción clara en ninguna dirección.")
-
-    # ── Frase 2: que confirma o contradice ────────────────────────────────
-    confirmaciones = []
-    contradicciones = []
-
-    # OBV
-    if obv == "ALCISTA":
-        (confirmaciones if "BULL" in regime else contradicciones if "BEAR" in regime else confirmaciones).append("volumen comprador (OBV alcista)")
-    elif obv == "BAJISTA":
-        (confirmaciones if "BEAR" in regime else contradicciones if "BULL" in regime else contradicciones).append("volumen vendedor (OBV bajista)")
-
-    # Divergencias (señales de posible giro)
-    if obv_div.get("bullish"):
-        contradicciones.append("acumulación detectada (divergencia OBV alcista)")
-    if obv_div.get("bearish"):
-        contradicciones.append("distribución detectada (divergencia OBV bajista)")
-    if rsi_div.get("bullish"):
-        contradicciones.append("divergencia RSI alcista (posible piso)")
-    if rsi_div.get("bearish"):
-        contradicciones.append("divergencia RSI bajista (posible techo)")
-
-    # Funding (segun si apoya o contradice el regimen)
-    if funding.get("available"):
-        imp = funding.get("signal_impact")
-        sent = funding.get("sentiment", "").lower()
-        regime_alc = "BULL" in regime
-        regime_baj = "BEAR" in regime
-        if imp == "BULLISH":
-            # funding negativo = presion alcista latente
-            if regime_alc:
-                confirmaciones.append(f"funding negativo ({sent})")
-            else:
-                contradicciones.append(f"funding negativo ({sent})")
-        elif imp == "BEARISH":
-            # funding alto = presion bajista latente
-            if regime_baj:
-                confirmaciones.append(f"funding alto ({sent})")
-            else:
-                contradicciones.append(f"funding alto ({sent})")
-
-    if confirmaciones and not contradicciones:
-        frases.append(f"Lo confirma el {', '.join(confirmaciones)}.")
-    elif contradicciones and not confirmaciones:
-        frases.append(f"Pero hay señales en contra: {', '.join(contradicciones)}.")
-    elif confirmaciones and contradicciones:
-        frases.append(f"Señales mixtas: a favor {', '.join(confirmaciones)}; en contra {', '.join(contradicciones)}.")
-
-    # ── Frase 3: matiz accionable / cautela ───────────────────────────────
-    matiz = []
-    if "LONG" in signal:
-        matiz.append(f"El bot emite señal de COMPRA (confianza {r.get('confidence','').lower()}).")
-    elif "SHORT" in signal:
-        matiz.append(f"El bot emite señal de VENTA (confianza {r.get('confidence','').lower()}).")
-    else:
-        # No hay señal: explicar por que
-        if bb_squeeze:
-            matiz.append("Volatilidad comprimida (Bollinger Squeeze): se acerca un movimiento brusco, conviene esperar el quiebre.")
-        elif rsi6 is not None and rsi6 > 70 and ("BULL" in regime or t1h == "ALCISTA"):
-            matiz.append("El impulso de corto plazo está sobrecomprado (RSI6 alto): el avance puede estar maduro.")
-        elif rsi6 is not None and rsi6 < 30 and ("BEAR" in regime or t1h == "BAJISTA"):
-            matiz.append("El impulso de corto plazo está sobrevendido (RSI6 bajo): la caída puede estar madura.")
-        else:
-            matiz.append("Sin señal operativa: el balance de indicadores no alcanza el umbral, conviene esperar confirmación.")
-
-    frases.append(matiz[0])
-
-    return " ".join(frases)
 
 
 def build_global_summary(results: list) -> dict:
-    """
-    Resumen global del mercado combinando los 4 activos.
-    Se apoya en BTC como lider (los altcoins suelen seguirlo).
-    """
     valid = [r for r in results if not r.get("error")]
     if not valid:
-        return {"headline": "Sin datos", "detail": "No hay análisis disponible."}
-
-    btc = next((r for r in valid if r.get("name") == "BTC"), None)
-
-    # Contar direcciones de regimen
-    def direction(regime):
-        if "BULL" in (regime or ""): return "alcista"
-        if "BEAR" in (regime or ""): return "bajista"
-        return "neutro"
-
-    dirs = [direction(r.get("regime")) for r in valid]
-    n_alc = dirs.count("alcista")
-    n_baj = dirs.count("bajista")
-    n_neu = dirs.count("neutro")
-
-    # Señales activas
-    longs = [r["name"] for r in valid if "LONG" in r.get("signal", "")]
-    shorts = [r["name"] for r in valid if "SHORT" in r.get("signal", "")]
-
-    # Squeeze global
-    squeezes = [r["name"] for r in valid if r.get("bb_squeeze")]
-
-    # ── Headline ──────────────────────────────────────────────────────────
-    if n_baj >= 3:
+        return {"headline": "Sin datos", "detail": "No hay analisis disponible."}
+    btc = next((r for r in valid if r["name"] == "BTC"), None)
+    n_up = sum(r["bias"] >= 15 for r in valid)
+    n_dn = sum(r["bias"] <= -15 for r in valid)
+    n = len(valid)
+    if n_dn >= max(3, n * 0.6):
         headline = "Mercado predominantemente bajista"
-    elif n_alc >= 3:
+    elif n_up >= max(3, n * 0.6):
         headline = "Mercado predominantemente alcista"
-    elif n_neu >= 3:
-        headline = "Mercado lateral / en transición"
     else:
-        headline = "Mercado mixto, sin consenso direccional"
-
-    # ── Detalle (2-3 frases) ──────────────────────────────────────────────
-    frases = []
-
-    # Frase BTC (lider)
+        headline = "Mercado mixto / en transicion"
+    parts = []
     if btc:
-        btc_dir = direction(btc.get("regime"))
-        btc_regime = btc.get("regime", "")
-        frases.append(f"BTC, que marca el ritmo, está en régimen {btc_regime} ({btc_dir}).")
-
-    # Frase reparto
-    reparto = []
-    if n_alc: reparto.append(f"{n_alc} alcista{'s' if n_alc>1 else ''}")
-    if n_baj: reparto.append(f"{n_baj} bajista{'s' if n_baj>1 else ''}")
-    if n_neu: reparto.append(f"{n_neu} neutro{'s' if n_neu>1 else ''}")
-    frases.append(f"De los 4 activos: {', '.join(reparto)}.")
-
-    # Frase señales / squeeze
-    if longs or shorts:
-        partes = []
-        if longs: partes.append(f"compra en {', '.join(longs)}")
-        if shorts: partes.append(f"venta en {', '.join(shorts)}")
-        frases.append(f"Señales activas: {'; '.join(partes)}.")
-    elif len(squeezes) >= 2:
-        frases.append(f"Sin señales activas, pero {len(squeezes)} activos tienen volatilidad comprimida ({', '.join(squeezes)}): posible movimiento brusco próximo.")
-    else:
-        frases.append("Sin señales operativas activas: el mercado no ofrece entradas de alta convicción ahora.")
-
-    return {
-        "headline": headline,
-        "detail": " ".join(frases),
-    }
+        parts.append(f"BTC, que marca el ritmo, esta en regimen {btc['regime']} (sesgo {btc['bias']:+d}), {btc['position'].lower()}.")
+    parts.append(f"De {n} activos: {n_up} alcistas, {n_dn} bajistas, {n - n_up - n_dn} sin tendencia.")
+    sig = [f"{r['name']} {r['signal']}" for r in valid if r["signal"] != "NEUTRAL"]
+    parts.append("Senales activas: " + ", ".join(sig) + "." if sig else "Sin senales de entrada ahora: no hay setups con ventaja clara.")
+    return {"headline": headline, "detail": " ".join(parts)}
 
 
-def run_analysis(main_tf: str = "4h") -> list:
-    results = []
-    for name, symbol in SYMBOLS.items():
-        print(f"  Analizando {name}...")
-        results.append(analyze(name, symbol, main_tf))
-        time.sleep(1)
+# ── Entrada de alto nivel para cripto ────────────────────────────────────────
 
-    # Aplicar filtro de correlacion con BTC (ajusta señales de altcoins)
-    results = apply_btc_correlation(results)
-
-    # Generar resumen por activo (despues del filtro BTC para reflejar señal final)
-    for r in results:
-        if not r.get("error"):
-            r["summary"] = build_asset_summary(r)
-            r["scenarios"] = build_scenarios(r)
-
-    return results
-
-
-if __name__ == "__main__":
-    print("Corriendo analisis v2.1...")
-    results = run_analysis()
-    for r in results:
-        if r["error"]:
-            print(f"\nERROR {r['name']}: {r['error']}")
-        else:
-            print(f"\n{'='*60}")
-            print(f"{r['name']} | ${r['price']} | Score: {r['score']}/{r['max_score']}")
-            print(f"Señal: {r['signal']} | Confianza: {r['confidence']}")
-            if r["signal_reason"]:
-                print(f"Motivo: {r['signal_reason']}")
-            print(f"ADX: {r['adx']} | Trending: {r['market_trending']}")
-            print(f"Tendencias: 1H={r['trend_1h']} | 1D={r['trend_1d']} | 1W={r['trend_1w']}")
-            print(f"Confirma 1H: {r['confirm_1h']}")
-            print(f"Divergencia: alcista={r['divergence']['bullish']} | bajista={r['divergence']['bearish']}")
-            print(f"OBV: {r['obv_trend']} | BB Squeeze: {r['bb_squeeze']}")
-            if r["warnings"]:
-                for w in r["warnings"]:
-                    print(f"  AVISO: {w}")
-            if r["close_short"]["should_close"]:
-                print(f"  CERRAR SHORT ({r['close_short']['urgency']}): {r['close_short']['reasons']}")
-            if r["close_long"]["should_close"]:
-                print(f"  CERRAR LONG ({r['close_long']['urgency']}): {r['close_long']['reasons']}")
+def analyze_crypto(name: str, dfs: dict, funding: dict | None, capital: float, risk_pct: float) -> dict:
+    frames = prepare_frames(dfs)
+    return analyze_frames(name, frames, "crypto", True, funding, capital, risk_pct)
