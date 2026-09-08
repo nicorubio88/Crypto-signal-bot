@@ -1,6 +1,12 @@
 config.json
 data/
+*.db
+*.db-journal
+*.log
 __pycache__/
-*.pyc
-.env
+*.py[cod]
 venv/
+.venv
+.vscode/
+.idea/
+.DS_Store
