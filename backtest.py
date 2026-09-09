@@ -25,6 +25,11 @@ from engine import prepare_frames, analyze_frames
 
 FEE_PCT = 0.05
 MAX_BARS = {"crypto": 12, "stock": 15}   # 12 velas de 4h = 48h; 15 dias
+SPLITS = (0.40, 0.40, 0.20)              # reparto de las salidas parciales
+
+
+def _pnl(entry, price, direction):
+    return (price - entry) / entry * 100 if direction == "LONG" else (entry - price) / entry * 100
 
 
 def run_backtest(h1: pd.DataFrame, asset_type: str = "crypto", name: str = "BT",
@@ -64,30 +69,39 @@ def run_backtest(h1: pd.DataFrame, asset_type: str = "crypto", name: str = "BT",
             frames_raw = {"1d": d, "1w": w}
 
         # ── Gestion del trade abierto con la vela i ──
+        # Mismas salidas parciales 40/40/20 que el paper trading en vivo, para que
+        # backtest y paper midan exactamente la misma estrategia.
         if open_trade:
             hi, lo, cl = float(bar["high"]), float(bar["low"]), float(bar["close"])
-            d_ = open_trade["direction"]
-            exit_price = reason = None
-            if d_ == "LONG":
-                if lo <= open_trade["stop"]:
-                    exit_price, reason = open_trade["stop"], "stop"
-                elif hi >= open_trade["tp"]:
-                    exit_price, reason = open_trade["tp"], "tp"
-            else:
-                if hi >= open_trade["stop"]:
-                    exit_price, reason = open_trade["stop"], "stop"
-                elif lo <= open_trade["tp"]:
-                    exit_price, reason = open_trade["tp"], "tp"
-            if exit_price is None and i - open_trade["bar"] >= MAX_BARS[asset_type]:
-                exit_price, reason = cl, "tiempo"
-            if exit_price is not None:
-                _record(trades, open_trade, exit_price, reason, i)
+            ot = open_trade
+            d_ = ot["direction"]
+            stage = ot["stage"]
+            restante = sum(SPLITS[stage:])
+            golpe_stop = (d_ == "LONG" and lo <= ot["stop"]) or (d_ == "SHORT" and hi >= ot["stop"])
+            if golpe_stop:
+                motivo = "stop" if stage == 0 else "stop_breakeven" if stage == 1 else "stop_ganancia"
+                _record(trades, ot, ot["stop"], motivo, i, restante)
                 open_trade = None
+            else:
+                while ot["stage"] < 3:
+                    tp = ot["tps"][ot["stage"]]
+                    if not ((d_ == "LONG" and hi >= tp) or (d_ == "SHORT" and lo <= tp)):
+                        break
+                    if ot["stage"] == 2:
+                        _record(trades, ot, tp, "tp_final", i, SPLITS[2])
+                        open_trade = None
+                        break
+                    ot["realized"] += _pnl(ot["entry"], tp, d_) * SPLITS[ot["stage"]]
+                    ot["stage"] += 1
+                    ot["stop"] = ot["entry"] if ot["stage"] == 1 else ot["tps"][0]
+                if open_trade and i - ot["bar"] >= MAX_BARS[asset_type]:
+                    _record(trades, ot, cl, "tiempo", i, sum(SPLITS[ot["stage"]:]))
+                    open_trade = None
 
         try:
             frames = prepare_frames(frames_raw)
             r = analyze_frames(name, frames, asset_type, allow_short, None, 10000, 0.02)
-        except Exception as e:
+        except Exception:
             continue
         if r.get("error"):
             continue
@@ -98,32 +112,37 @@ def run_backtest(h1: pd.DataFrame, asset_type: str = "crypto", name: str = "BT",
             exh = r["exhaustion"]
             if (r["signal"] in ("LONG", "SHORT") and r["signal"] != d_) or \
                (exh["score"] >= 60 and exh["direction"] and exh["direction"] != ("ALCISTA" if d_ == "LONG" else "BAJISTA")):
-                _record(trades, open_trade, float(bar["close"]), "senal", i)
+                _record(trades, open_trade, float(bar["close"]), "senal", i, sum(SPLITS[open_trade["stage"]:]))
                 open_trade = None
 
         if not open_trade and r["signal"] in ("LONG", "SHORT") and r.get("plan") and not r["plan"].get("rejected"):
             signals_seen += 1
             p = r["plan"]
-            open_trade = {"direction": r["signal"], "entry": float(bar["close"]), "stop": p["stop"], "tp": p["tp1"],
+            open_trade = {"direction": r["signal"], "entry": float(bar["close"]), "stop": p["stop"],
+                          "tps": [p["tp1"], p["tp2"], p["tp3"]], "stage": 0, "realized": 0.0,
+                          "risk0": abs(float(bar["close"]) - p["stop"]) / float(bar["close"]) * 100,
                           "bar": i, "time": str(bar_time)[:16], "setup": r["setup"], "confidence": r["confidence"],
-                          "regime": r["regime"]}
+                          "regime": r["regime"], "opportunity": r.get("opportunity")}
         if progress and (i - min_bars) % 200 == 0:
             print(f"  {i}/{end} velas, {len(trades)} trades, {time.time() - t0:.0f}s")
 
     if open_trade:
-        _record(trades, open_trade, float(ref_all["close"].iloc[end - 1]), "abierto_al_final", end - 1)
+        _record(trades, open_trade, float(ref_all["close"].iloc[end - 1]), "abierto_al_final",
+                end - 1, sum(SPLITS[open_trade["stage"]:]))
 
     return _stats(trades, n_bars=end - min_bars, ref_tf=ref_tf, name=name) | {"elapsed_s": round(time.time() - t0, 1)}
 
 
-def _record(trades, ot, exit_price, reason, bar_i):
+def _record(trades, ot, exit_price, reason, bar_i, frac_restante=1.0):
+    """Consolida el trade sumando lo ya realizado en las salidas parciales."""
     e, d = ot["entry"], ot["direction"]
-    pnl = (exit_price - e) / e * 100 if d == "LONG" else (e - exit_price) / e * 100
-    risk = abs(e - ot["stop"]) / e * 100
+    total = ot.get("realized", 0.0) + _pnl(e, exit_price, d) * frac_restante
+    risk = ot.get("risk0") or (abs(e - ot["stop"]) / e * 100)
     trades.append({**{k: ot[k] for k in ("direction", "setup", "confidence", "regime", "time")},
+                   "opportunity": ot.get("opportunity"),
                    "entry": round(e, 4), "exit": round(exit_price, 4), "reason": reason,
-                   "pnl_pct": round(pnl, 3), "pnl_net": round(pnl - 2 * FEE_PCT, 3),
-                   "r": round(pnl / risk, 2) if risk else None, "bars": bar_i - ot["bar"]})
+                   "pnl_pct": round(total, 3), "pnl_net": round(total - 2 * FEE_PCT, 3),
+                   "r": round(total / risk, 2) if risk else None, "bars": bar_i - ot["bar"]})
 
 
 def _stats(trades, n_bars, ref_tf, name):

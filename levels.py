@@ -31,6 +31,12 @@ TF_FRACTAL = {"1w": 2, "1d": 3, "4h": 3, "1h": 4}
 # Vida media (en velas) para el decaimiento por recencia
 TF_HALFLIFE = {"1w": 80, "1d": 120, "4h": 200, "1h": 200}
 
+# Referencia ABSOLUTA de fuerza: peso crudo que corresponde a un nivel "solido"
+# de verdad (por ejemplo un swing 1D reciente + dos swings 4H + el maximo del dia
+# anterior ~ 9). Se usa para que la etiqueta FUERTE signifique algo por si sola y
+# no solo "el mejor de este activo".
+ABS_REFERENCE = 9.0
+
 
 # ── Swings por fractales ──────────────────────────────────────────────────────
 
@@ -159,7 +165,6 @@ def build_levels(dfs: dict, price: float, ref_tf: str = "4h", asset_type: str = 
     tol = max(0.45 * atr_ref, price * 0.0025)
 
     cands = []
-    now_pos = {}
 
     # 1. Swings por timeframe
     for tf, df in dfs.items():
@@ -231,16 +236,28 @@ def build_levels(dfs: dict, price: float, ref_tf: str = "4h", asset_type: str = 
         sources = [f"{k} x{v}" if v > 1 else k for k, v in
                    sorted(src_count.items(), key=lambda kv: -kv[1])][:4]
         last_touch = max((x["time"] for x in m if x["time"] is not None), default=None)
+        lo_p, hi_p = min(x["price"] for x in m), max(x["price"] for x in m)
         levels.append({"price": float(cl["center"]), "raw": raw, "touches": touches,
                        "flip": flip, "tfs": [TF_LABEL[t] for t in tfs], "sources": sources,
                        "last_touch": str(last_touch)[:16] if last_touch is not None else None,
-                       "lo": min(x["price"] for x in m), "hi": max(x["price"] for x in m)})
+                       "lo": lo_p, "hi": hi_p})
 
     max_raw = max(l["raw"] for l in levels)
     for l in levels:
+        # strength = fuerza RELATIVA dentro del activo (para comparar barras en
+        # la misma tarjeta). quality = fuerza ABSOLUTA contra una referencia fija.
+        # Sin la absoluta, en un grafico sin niveles serios el mejor de los malos
+        # igual salia 100 y se etiquetaba FUERTE, y encima sumaba confianza a la
+        # señal. Ahora la etiqueta usa la menor de las dos: para decir FUERTE hay
+        # que serlo en terminos absolutos Y destacarse dentro del activo.
         l["strength"] = int(round(100 * l["raw"] / max_raw))
-        l["label"] = "FUERTE" if l["strength"] >= 60 else "MEDIO" if l["strength"] >= 30 else "DEBIL"
+        l["quality"] = int(round(min(100.0, 100 * l["raw"] / ABS_REFERENCE)))
+        eff = min(l["strength"], l["quality"])
+        l["label"] = "FUERTE" if eff >= 60 else "MEDIO" if eff >= 30 else "DEBIL"
         l["distance_pct"] = round((l["price"] / price - 1) * 100, 2)
+        # Ancho de la zona: un nivel angosto permite stops ajustados, uno ancho
+        # es una franja difusa y obliga a dar mas aire.
+        l["width_pct"] = round((l["hi"] - l["lo"]) / price * 100, 2)
         del l["raw"]
 
     # Nivel actual (precio dentro de la zona) y reparto

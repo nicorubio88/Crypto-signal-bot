@@ -146,6 +146,27 @@ def trend_score(df: pd.DataFrame, swings: list | None = None, fractal: int = 3) 
 
 # ── Divergencias con swings reales ───────────────────────────────────────────
 
+def _significance(df: pd.DataFrame, col: str) -> float:
+    """
+    Diferencia minima para considerar que el indicador cambio de verdad.
+
+    Para el RSI son 2 puntos (escala fija 0-100). Para el OBV NO se puede usar
+    un porcentaje: el OBV es un acumulado que cruza el cero y se vuelve negativo
+    en las caidas, y ahi multiplicar por 1.02 agranda el valor en vez de achicarlo
+    (bug corregido en sep-2026: producia divergencias alcistas falsas justo en
+    las tendencias bajistas, que es cuando se buscan pisos). Se usa en cambio un
+    5 % del rango reciente del propio OBV, que es escala-independiente y funciona
+    con valores negativos.
+    """
+    if col.startswith("RSI"):
+        return 2.0
+    ref = df[col].tail(120).dropna()
+    if len(ref) < 10:
+        return 0.0
+    rng = float(ref.max() - ref.min())
+    return 0.05 * rng if rng > 0 else 0.0
+
+
 def divergences(df: pd.DataFrame, swings: list, col: str = "RSI14") -> dict:
     """
     Divergencia alcista: ultimo swing low del precio mas bajo que el anterior,
@@ -157,19 +178,20 @@ def divergences(df: pd.DataFrame, swings: list, col: str = "RSI14") -> dict:
     if col not in df.columns:
         return out
     n = len(df)
+    thr = _significance(df, col)
     lows = _last_swings(swings, "L", 2)
     highs = _last_swings(swings, "H", 2)
     ind = df[col].values
     if len(lows) == 2 and n - 1 - lows[-1]["pos"] <= 25:
         a, b = lows[-2], lows[-1]
         ia, ib = ind[a["pos"]], ind[b["pos"]]
-        if b["price"] < a["price"] and pd.notna(ia) and pd.notna(ib) and ib > ia * (1.02 if col == "OBV" else 1) + (2 if col.startswith("RSI") else 0):
+        if b["price"] < a["price"] and pd.notna(ia) and pd.notna(ib) and ib > ia + thr:
             out["bullish"] = True
             out["detail"] = f"precio hizo minimo mas bajo pero {col} mas alto"
     if len(highs) == 2 and n - 1 - highs[-1]["pos"] <= 25:
         a, b = highs[-2], highs[-1]
         ia, ib = ind[a["pos"]], ind[b["pos"]]
-        if b["price"] > a["price"] and pd.notna(ia) and pd.notna(ib) and ib < ia * (0.98 if col == "OBV" else 1) - (2 if col.startswith("RSI") else 0):
+        if b["price"] > a["price"] and pd.notna(ia) and pd.notna(ib) and ib < ia - thr:
             out["bearish"] = True
             out["detail"] = f"precio hizo maximo mas alto pero {col} mas bajo"
     return out
@@ -182,12 +204,25 @@ def exhaustion(df: pd.DataFrame, swings: list, trend_label: str) -> dict:
       ADX cayendo desde pico (20), RSI6 extremo (15), MACD hist contrayendose (10).
     """
     score, signals = 0, []
-    is_bull = "ALCISTA" in trend_label
-    is_bear = "BAJISTA" in trend_label
-    if not (is_bull or is_bear) or len(df) < 20:
+    if len(df) < 20:
         return {"score": 0, "reversing": False, "direction": None, "signals": []}
 
     st = structure_state(df, swings)
+    # La direccion a evaluar sale de la ESTRUCTURA, no del score compuesto.
+    # Motivo (sep-2026): cuando aparece un CHoCH, el score ya se dio vuelta y el
+    # label pasa a BAJISTA mientras la estructura sigue siendo ALCISTA. Si nos
+    # guiabamos por el label, el detector dejaba de sumar el CHoCH justo en el
+    # momento que tenia que gritar, y encima empezaba a buscar el giro contrario.
+    if st["structure"] == "ALCISTA":
+        is_bull, is_bear = True, False
+    elif st["structure"] == "BAJISTA":
+        is_bull, is_bear = False, True
+    else:
+        is_bull = "ALCISTA" in trend_label
+        is_bear = "BAJISTA" in trend_label
+    if not (is_bull or is_bear):
+        return {"score": 0, "reversing": False, "direction": None, "signals": []}
+
     if is_bull and st["choch"] == "BAJISTA":
         score += 30; signals.append(f"Perdio el ultimo minimo relevante ({st['last_low']:.4g}): cambio de caracter bajista")
     if is_bear and st["choch"] == "ALCISTA":

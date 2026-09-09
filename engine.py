@@ -34,6 +34,10 @@ BIAS_WEIGHTS = {
     "stock": {"1w": 0.45, "1d": 0.55},
 }
 
+# Calidad absoluta minima (0-100) que tiene que tener un soporte/resistencia para
+# operar un pullback contra el. Por debajo de esto el nivel no esta comprobado.
+MIN_LEVEL_QUALITY = 25
+
 
 def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -216,13 +220,22 @@ def analyze_frames(name: str, frames: dict, asset_type: str = "crypto",
     bull_bias = bias >= 15
     bear_bias = bias <= -15
 
-    if bull_bias and near_sup and sup_zone and timing["direction"] != "BAJISTA" and rsi14 < 70:
+    # Calidad minima del nivel para operar un pullback. La tesis del pullback es
+    # "este nivel aguanta": si el nivel no lo respeta nadie (poca fuerza absoluta,
+    # un solo toque), no hay tesis, hay una linea dibujada al azar. Se mide con la
+    # calidad ABSOLUTA para no premiar al mejor de los niveles malos.
+    def _nivel_ok(z):
+        if not z:
+            return False
+        return min(z["strength"], z.get("quality", z["strength"])) >= MIN_LEVEL_QUALITY
+
+    if bull_bias and near_sup and _nivel_ok(sup_zone) and timing["direction"] != "BAJISTA" and rsi14 < 70:
         setup, direction = "PULLBACK", "LONG"
         reasons.append(f"Tendencia {regime.lower()} y precio apoyado en soporte {_lab(sup_zone)} ({_fmt(sup_zone['price'])})")
     elif breakout_up and bias >= -10 and (vol_ok or breakout_up["strength"] >= 50) and timing["direction"] != "BAJISTA":
         setup, direction = "BREAKOUT", "LONG"
         reasons.append(f"Ruptura de resistencia {_lab(breakout_up, True)} en {_fmt(breakout_up['price'])}" + (" con volumen" if vol_ok else ""))
-    elif allow_short and bear_bias and near_res and res_zone and timing["direction"] != "ALCISTA" and rsi14 > 30:
+    elif allow_short and bear_bias and near_res and _nivel_ok(res_zone) and timing["direction"] != "ALCISTA" and rsi14 > 30:
         setup, direction = "PULLBACK", "SHORT"
         reasons.append(f"Tendencia {regime.lower()} y precio rechazado en resistencia {_lab(res_zone, True)} ({_fmt(res_zone['price'])})")
     elif allow_short and breakout_dn and bias <= 10 and (vol_ok or breakout_dn["strength"] >= 50) and timing["direction"] != "ALCISTA":
@@ -231,6 +244,7 @@ def analyze_frames(name: str, frames: dict, asset_type: str = "crypto",
 
     # ── Stop / objetivos con niveles reales ──
     plan = None
+    retest = None
     if direction:
         entry = price
         if direction == "LONG":
@@ -239,14 +253,12 @@ def analyze_frames(name: str, frames: dict, asset_type: str = "crypto",
             if entry - stop > 3.0 * atr:          # stop demasiado lejos -> usar ATR
                 stop = entry - 1.8 * atr
             targets = [r_["price"] for r_ in lv["resistances"] if r_["price"] > entry + 0.5 * atr]
-            tp3_fallback = entry + 4.5 * atr
         else:
             base = res_zone if setup == "PULLBACK" else (breakout_dn or res_zone)
             stop = (base["hi"] if base else entry) + 0.5 * atr
             if stop - entry > 3.0 * atr:
                 stop = entry + 1.8 * atr
             targets = [s_["price"] for s_ in lv["supports"] if s_["price"] < entry - 0.5 * atr]
-            tp3_fallback = entry - 4.5 * atr
         risk = abs(entry - stop)
         tps = targets[:3]
         while len(tps) < 3:
@@ -255,14 +267,23 @@ def analyze_frames(name: str, frames: dict, asset_type: str = "crypto",
             tps.append(last + (2.0 * atr if direction == "LONG" else -2.0 * atr))
         rr1 = abs(tps[0] - entry) / risk if risk > 0 else 0
         rr2 = abs(tps[1] - entry) / risk if risk > 0 else 0
-        risk_amount = capital * risk_pct
-        pos_usd = risk_amount / (risk / entry) if risk > 0 else 0
         plan = {"direction": direction, "entry": round(entry, 6), "stop": round(stop, 6),
                 "tp1": round(tps[0], 6), "tp2": round(tps[1], 6), "tp3": round(tps[2], 6),
                 "risk_pct": round(risk / entry * 100, 2), "rr_tp1": round(rr1, 2), "rr_tp2": round(rr2, 2),
-                "risk_usd": round(risk_amount, 2), "position_usd": round(pos_usd, 2),
-                "units": round(pos_usd / entry, 6) if entry else 0,
                 "stop_basis": (base["sources"][0] if base and base.get("sources") else "ATR")}
+
+        # ── Entrada extendida: en una ruptura, entrar lejos del nivel roto es el
+        # peor precio posible (el stop queda enorme y el R/R se destruye). Si el
+        # cierre quedo a mas de 1 ATR del nivel, se sugiere esperar el retest.
+        if setup == "BREAKOUT" and base:
+            nivel = base["hi"] if direction == "LONG" else base["lo"]
+            extension = abs(entry - nivel) / atr if atr > 0 else 0
+            if extension > 1.0:
+                retest = {"price": round(nivel, 6), "extension_atr": round(extension, 2),
+                          "texto": f"Entrada extendida ({extension:.1f} ATR sobre el nivel roto). "
+                                   f"Mejor esperar el retest de {_fmt(nivel)} y entrar ahi: mismo objetivo, mucho menos riesgo."}
+                warnings.append(retest["texto"])
+
         # Rechazo por falta de espacio
         if rr1 < 1.2:
             warnings.append(f"Sin espacio: el primer objetivo ({_fmt(tps[0])}) queda a solo {rr1:.1f}R del riesgo")
@@ -276,9 +297,14 @@ def analyze_frames(name: str, frames: dict, asset_type: str = "crypto",
         conf_pts += 2 if aligned else 1 if abs(bias) >= 35 else 0
         zone = sup_zone if direction == "LONG" else res_zone
         if setup == "PULLBACK" and zone:
-            conf_pts += 2 if zone["strength"] >= 60 else 1 if zone["strength"] >= 30 else 0
+            # se usa la calidad ABSOLUTA del nivel: apoyarse en el mejor nivel de
+            # un grafico sin niveles serios no es apoyarse en nada
+            q = min(zone["strength"], zone.get("quality", zone["strength"]))
+            conf_pts += 2 if q >= 60 else 1 if q >= 30 else 0
         if setup == "BREAKOUT":
             conf_pts += 2 if vol_ok else 0
+            if retest:
+                conf_pts -= 1
         want = "ALCISTA" if direction == "LONG" else "BAJISTA"
         conf_pts += 1 if timing["direction"] == want else 0
         conf_pts += 1 if plan and plan["rr_tp1"] >= 2 else 0
@@ -292,7 +318,36 @@ def analyze_frames(name: str, frames: dict, asset_type: str = "crypto",
             conf_pts -= 2; warnings.append(f"Cambio de caracter {ref_struct['choch'].lower()} en {ref_tf.upper()}")
         confidence = "ALTA" if conf_pts >= 5 else "MEDIA" if conf_pts >= 3 else "BAJA"
 
+    # ── Tamaño de posicion escalado por confianza ──
+    # Arriesgar lo mismo en un setup de confianza BAJA que en uno de ALTA es
+    # regalar la ventaja: el tamaño tiene que seguir a la conviccion.
+    if plan and not plan.get("rejected"):
+        # PROVISORIO: en los ensayos la confianza todavia NO discrimina resultado
+        # (MEDIA rindio igual o mejor que ALTA), asi que el escalado se mantiene
+        # suave a proposito. Revisar con datos reales de paper trading antes de
+        # separar mas los tamaños.
+        mult = {"ALTA": 1.0, "MEDIA": 0.75, "BAJA": 0.5}.get(confidence, 0.6)
+        risk_eff = risk_pct * mult
+        risk_amount = capital * risk_eff
+        stop_dist = plan["risk_pct"] / 100
+        pos_usd = risk_amount / stop_dist if stop_dist > 0 else 0
+        plan.update({"risk_pct_capital": round(risk_eff * 100, 2), "size_factor": mult,
+                     "risk_usd": round(risk_amount, 2), "position_usd": round(pos_usd, 2),
+                     "units": round(pos_usd / plan["entry"], 6) if plan["entry"] else 0})
+
     signal = direction or "NEUTRAL"
+
+    # ── Checklist de diagnostico: por que hay (o no hay) señal ──
+    checks, opportunity = _build_checks(bias, aligned, position, sup_zone, res_zone, near_sup, near_res,
+                                        breakout_up, breakout_dn, vol_ok, timing, plan, exh, ref_struct,
+                                        rsi14, allow_short, ref_tf, direction, setup)
+    faltan = [c["name"] for c in checks if not c["ok"]]
+    if signal == "NEUTRAL":
+        falta_txt = ("Para que aparezca una señal falta: " + ", ".join(faltan).lower() + "."
+                     if faltan else "Condiciones dadas pero sin gatillo claro todavia.")
+    else:
+        falta_txt = "Todas las condiciones principales dadas." if not faltan else \
+                    "Señal con reservas: " + ", ".join(faltan).lower() + "."
 
     # ── Accion sugerida (lenguaje claro) ──
     action, action_detail = _suggest_action(asset_type, allow_short, signal, setup, regime, bias,
@@ -312,6 +367,7 @@ def analyze_frames(name: str, frames: dict, asset_type: str = "crypto",
         "signal": signal, "setup": setup, "confidence": confidence, "reasons": reasons,
         "warnings": warnings + exh["signals"][:2] if exh["reversing"] else warnings,
         "action": action, "action_detail": action_detail,
+        "checks": checks, "opportunity": opportunity, "missing": falta_txt, "retest": retest,
         "regime": regime, "bias": bias, "aligned": aligned,
         "trends": {tf: {"label": t["label"], "score": t["score"], "components": t["components"],
                         "structure": t["structure"]["structure"], "bos": t["structure"].get("bos"),
@@ -344,6 +400,88 @@ def analyze_frames(name: str, frames: dict, asset_type: str = "crypto",
         "funding": funding, "scenarios": scenarios, "summary": summary,
         "ref_tf": ref_tf, "updated_at": _utcnow().strftime("%Y-%m-%d %H:%M UTC"), "error": None,
     }
+
+
+def _build_checks(bias, aligned, position, sup_zone, res_zone, near_sup, near_res,
+                  breakout_up, breakout_dn, vol_ok, timing, plan, exh, ref_struct,
+                  rsi14, allow_short, ref_tf, direction, setup):
+    """
+    Checklist explicito de las condiciones que el motor evalua, con su estado y
+    el motivo. Es el "por que" del diagnostico: si no hay señal, muestra que falta;
+    si la hay, muestra sobre que se apoya. Devuelve tambien un puntaje de calidad
+    de oportunidad 0-100 para poder ordenar activos entre si.
+    """
+    cand = direction or ("LONG" if bias > 0 else "SHORT" if bias < 0 else None)
+    checks = []
+
+    # 1. Tendencia
+    ok_t = abs(bias) >= 15
+    checks.append({"name": "Tendencia definida", "ok": ok_t, "weight": 25,
+                   "detail": (f"sesgo {bias:+d}" + (", los marcos alineados" if aligned else ", marcos no alineados"))
+                   if ok_t else f"sesgo {bias:+d}: el mercado no tiene direccion clara"})
+
+    # 2. Ubicacion
+    if cand == "LONG":
+        ok_u = bool(near_sup or breakout_up)
+        det = (f"apoyado en soporte {_fmt(sup_zone['price'])}" if near_sup else
+               f"rompio resistencia {_fmt(breakout_up['price'])}" if breakout_up else
+               f"contra la resistencia {_fmt(res_zone['price'])}: comprar aca es pagar caro" if near_res and res_zone else
+               "en el medio del rango: comprar aca no tiene ventaja")
+    elif cand == "SHORT":
+        ok_u = bool(near_res or breakout_dn)
+        det = (f"rechazado en resistencia {_fmt(res_zone['price'])}" if near_res else
+               f"perdio soporte {_fmt(breakout_dn['price'])}" if breakout_dn else
+               f"sobre el soporte {_fmt(sup_zone['price'])}: vender aca es vender el piso" if near_sup and sup_zone else
+               "en el medio del rango: vender aca no tiene ventaja")
+    else:
+        ok_u, det = False, "sin direccion candidata"
+    checks.append({"name": "Ubicacion con ventaja", "ok": ok_u, "weight": 25, "detail": det})
+
+    # 3. Calidad del nivel en el que se apoya
+    zona = sup_zone if cand == "LONG" else res_zone
+    q = min(zona["strength"], zona.get("quality", zona["strength"])) if zona else 0
+    checks.append({"name": "Nivel de referencia solido", "ok": q >= 30, "weight": 10,
+                   "detail": f"fuerza {q}/100 ({zona['label'].lower()}, {zona['touches']} toques)" if zona
+                             else "no hay nivel de referencia cerca"})
+
+    # 4. Espacio / R-R
+    rr = plan["rr_tp1"] if plan else None
+    if rr is None and zona:
+        rr = None
+    ok_e = bool(rr and rr >= 1.2)
+    checks.append({"name": "Espacio hasta el objetivo", "ok": ok_e, "weight": 20,
+                   "detail": f"R/R al primer objetivo 1:{rr}" if rr is not None
+                             else "no calculable sin setup: el precio no esta en zona de entrada"})
+
+    # 5. Timing
+    want = "ALCISTA" if cand == "LONG" else "BAJISTA" if cand == "SHORT" else None
+    ok_ti = timing["direction"] == want
+    checks.append({"name": "Timing de corto plazo", "ok": ok_ti, "weight": 15,
+                   "detail": f"1H {timing['direction'].lower()} ({timing['bull']}↑ {timing['bear']}↓)"
+                             + ("" if ok_ti else ", todavia no confirma")})
+
+    # 6. Volumen (solo relevante en rupturas)
+    if breakout_up or breakout_dn or setup == "BREAKOUT":
+        checks.append({"name": "Volumen en la ruptura", "ok": bool(vol_ok), "weight": 5,
+                       "detail": "volumen por encima del promedio" if vol_ok
+                                 else "ruptura sin volumen: alto riesgo de ser falsa"})
+
+    # 7. Banderas rojas
+    flags = []
+    if exh.get("reversing") and exh.get("direction") and exh["direction"] != want:
+        flags.append(f"agotamiento {exh['score']}/100 hacia {exh['direction'].lower()}")
+    if ref_struct.get("choch") and ref_struct["choch"] != want:
+        flags.append(f"cambio de caracter {ref_struct['choch'].lower()} en {ref_tf.upper()}")
+    if cand == "LONG" and rsi14 >= 70:
+        flags.append(f"RSI {rsi14:.0f}: comprado y estirado")
+    if cand == "SHORT" and rsi14 <= 30:
+        flags.append(f"RSI {rsi14:.0f}: vendido y estirado")
+    checks.append({"name": "Sin banderas rojas", "ok": not flags, "weight": 15,
+                   "detail": "; ".join(flags) if flags else "nada en contra"})
+
+    total_w = sum(c["weight"] for c in checks)
+    got = sum(c["weight"] for c in checks if c["ok"])
+    return checks, int(round(100 * got / total_w)) if total_w else 0
 
 
 def _bb_squeeze(df):
@@ -478,7 +616,25 @@ def build_global_summary(results: list) -> dict:
     parts.append(f"De {n} activos: {n_up} alcistas, {n_dn} bajistas, {n - n_up - n_dn} sin tendencia.")
     sig = [f"{r['name']} {r['signal']}" for r in valid if r["signal"] != "NEUTRAL"]
     parts.append("Senales activas: " + ", ".join(sig) + "." if sig else "Sin senales de entrada ahora: no hay setups con ventaja clara.")
-    return {"headline": headline, "detail": " ".join(parts)}
+
+    # Aviso de exposicion correlacionada: las cripto se mueven casi todas juntas,
+    # asi que abrir varias posiciones en la misma direccion NO diversifica, es la
+    # misma apuesta multiplicada. El riesgo real es la suma, no el de cada una.
+    riesgo = None
+    longs = [r for r in valid if r["signal"] == "LONG"]
+    shorts = [r for r in valid if r["signal"] == "SHORT"]
+    lado = longs if len(longs) >= len(shorts) else shorts
+    if len(lado) >= 2:
+        total = sum((r.get("plan") or {}).get("risk_pct_capital", 0) for r in lado)
+        riesgo = (f"Atencion a la exposicion: {len(lado)} señales {lado[0]['signal']} a la vez. "
+                  f"Las cripto se mueven correlacionadas, asi que no son {len(lado)} apuestas distintas "
+                  f"sino una sola multiplicada" + (f" (riesgo acumulado {total:.1f}% del capital)." if total else "."))
+        parts.append(riesgo)
+
+    # Ranking por calidad de oportunidad, util incluso sin señales
+    ranking = sorted(valid, key=lambda r: -(r.get("opportunity") or 0))[:3]
+    parts.append("Mejor posicionados ahora: " + ", ".join(f"{r['name']} {r.get('opportunity', 0)}/100" for r in ranking) + ".")
+    return {"headline": headline, "detail": " ".join(parts), "exposure_warning": riesgo}
 
 
 # ── Entrada de alto nivel para cripto ────────────────────────────────────────
