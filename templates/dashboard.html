@@ -130,8 +130,9 @@
       <input id="wl-ratio" placeholder="Ratio CEDEAR" type="number" step="0.01">
       <select id="wl-type"><option value="cedear">CEDEAR</option><option value="etf">ETF</option><option value="arg">Acción argentina (.BA)</option></select>
       <label class="txt"><input type="checkbox" id="wl-holding"> en cartera</label>
-      <button class="btn primary" onclick="addTicker()">Agregar</button>
+      <button class="btn primary" id="wl-btn" onclick="addTicker()">Agregar</button>
     </div>
+    <div id="wl-msg" class="txt" style="min-height:1.2em;margin-bottom:6px"></div>
     <div id="wl-list" class="pills"></div>
     <p class="txt" style="margin-top:8px">El análisis técnico se hace sobre el subyacente en USD (datos limpios). El ratio se usa para el CCL implícito: verificá los ratios en BYMA, cambian con splits.</p>
   </details>
@@ -226,7 +227,26 @@ function ladder(r) {
   return `<div class="ladder">${rows.join('')}</div>`;
 }
 function trendPills(r) { const t = r.trends || {}; return `<div class="pills">${['1w', '1d', '4h', '1h'].filter(k => t[k]).map(k => `<span class="pill ${trendClass(t[k].label)}" title="estructura ${t[k].structure}${t[k].choch ? ' · CHoCH ' + t[k].choch : ''}${t[k].bos ? ' · BOS ' + t[k].bos : ''}">${k.toUpperCase()} ${t[k].label} ${t[k].score > 0 ? '+' : ''}${t[k].score}${t[k].choch ? ' ⚠' : ''}</span>`).join('')}</div>`; }
-function planBlock(r) { const p = r.plan; if (!p || p.rejected) return ''; return `<div class="plan"><b>PLAN ${p.direction}</b> · entrada <b>${fmt(p.entry)}</b> · stop <b>${fmt(p.stop)}</b> (${p.risk_pct}%, ${p.stop_basis})<br>TP1 <b>${fmt(p.tp1)}</b> (1:${p.rr_tp1}) · TP2 <b>${fmt(p.tp2)}</b> (1:${p.rr_tp2}) · TP3 <b>${fmt(p.tp3)}</b><br>tamaño <b>${fmt(p.position_usd)}</b> (${p.units} ${r.name}) arriesgando ${fmt(p.risk_usd)} <button class="btn" style="padding:2px 8px;margin-left:6px" onclick='usePlan(${JSON.stringify({asset: r.name, ...p})})'>Usar plan</button></div>`; }
+function oppBar(v) {
+  const col = v >= 70 ? '#3fb950' : v >= 45 ? '#d29922' : '#8b949e';
+  return `<div style="display:flex;align-items:center;gap:8px;font-size:.72rem">
+    <span style="color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Oportunidad</span>
+    <span style="flex:1;height:6px;background:#21262d;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;width:${v}%;background:${col}"></i></span>
+    <b style="color:${col}">${v}/100</b></div>`;
+}
+function checksBlock(r) {
+  if (!r.checks) return '';
+  const filas = r.checks.map(c => `<div style="display:grid;grid-template-columns:16px 1fr;gap:6px;padding:2px 0;font-size:.72rem">
+      <span style="color:${c.ok ? '#3fb950' : '#f85149'}">${c.ok ? '✓' : '✕'}</span>
+      <span><b style="color:${c.ok ? 'var(--text)' : '#e3b341'};font-weight:500">${c.name}</b><span style="color:var(--muted)"> — ${c.detail}</span></span>
+    </div>`).join('');
+  return `<div class="ladder" style="background:rgba(88,166,255,.05)">
+      ${oppBar(r.opportunity ?? 0)}
+      <div style="margin-top:6px">${filas}</div>
+      <div style="font-size:.72rem;color:#79c0ff;margin-top:6px;border-top:1px solid var(--border);padding-top:6px">${r.missing || ''}</div>
+    </div>`;
+}
+function planBlock(r) { const p = r.plan; if (!p || p.rejected) return ''; return `<div class="plan"><b>PLAN ${p.direction}</b> · entrada <b>${fmt(p.entry)}</b> · stop <b>${fmt(p.stop)}</b> (${p.risk_pct}%, ${p.stop_basis})<br>TP1 <b>${fmt(p.tp1)}</b> (1:${p.rr_tp1}) · TP2 <b>${fmt(p.tp2)}</b> (1:${p.rr_tp2}) · TP3 <b>${fmt(p.tp3)}</b><br>tamaño <b>${fmt(p.position_usd)}</b> (${p.units} ${r.name}) arriesgando ${fmt(p.risk_usd)} = ${p.risk_pct_capital}% del capital (factor ${p.size_factor} por confianza ${r.confidence}) <button class="btn" style="padding:2px 8px;margin-left:6px" onclick='usePlan(${JSON.stringify({asset: r.name, ...p})})'>Usar plan</button></div>`; }
 
 function cryptoCard(r) {
   if (r.error) return `<div class="card"><div class="card-head"><span class="name">${r.name}</span></div><span class="warn">Error: ${r.error}</span></div>`;
@@ -238,6 +258,7 @@ function cryptoCard(r) {
     <div class="action ${actionClass(r.action)}">${r.action}<small>${r.action_detail || ''}</small></div>
     ${trendPills(r)}
     ${ladder(r)}
+    ${checksBlock(r)}
     ${planBlock(r)}
     ${warns}
     <div class="kv">
@@ -256,7 +277,7 @@ function cryptoCard(r) {
 async function loadCrypto() {
   const d = await api('/api/data');
   $('#meta').textContent = `Cripto: ${d.last_update || '—'} · capital $${d.config.capital} · riesgo ${(d.config.risk_pct * 100).toFixed(1)}%`;
-  const s = d.summary || {}; $('#crypto-summary').innerHTML = `<h2>${s.headline || 'Sin datos todavía'}</h2><p>${s.detail || 'El primer análisis tarda ~1 minuto.'}</p>`;
+  const s = d.summary || {}; $('#crypto-summary').innerHTML = `<h2>${s.headline || 'Sin datos todavía'}</h2><p>${s.detail || 'El primer análisis tarda ~1 minuto.'}</p>` + (s.exposure_warning ? `<p class="warn" style="margin-top:6px">⚠ ${s.exposure_warning}</p>` : '');
   $('#crypto-grid').innerHTML = (d.results || []).map(cryptoCard).join('');
 }
 async function refreshCrypto() { await api('/api/refresh'); $('#meta').textContent = 'Analizando cripto… (1 min)'; setTimeout(loadCrypto, 60000); }
@@ -267,27 +288,66 @@ let stocksData = [];
 async function loadStocks() {
   const d = await api('/api/stocks'); stocksData = d.results || [];
   const s = d.summary || {}; $('#stocks-summary').innerHTML = `<h2>${s.headline || 'Sin datos todavía'}</h2><p>${s.detail || 'Corré "↻ Acciones".'} <span class="badge">${d.last_update || ''}</span></p>`;
-  $('#wl-list').innerHTML = (d.watchlist || []).map(w => `<span class="pill">${w.ticker}${w.holding ? ' ★' : ''} <a href="#" style="color:#f85149;text-decoration:none" onclick="removeTicker('${w.ticker}');return false">✕</a></span>`).join('');
+  const analizados = new Set(stocksData.map(r => r.ticker));
+  $('#wl-list').innerHTML = (d.watchlist || []).map(w => {
+    const pend = analizados.has(w.ticker) ? '' : ' <span style="color:#e3b341" title="todavía no analizado">•</span>';
+    const ratio = w.ratio ? `<span style="color:var(--muted)"> ×${w.ratio}</span>` : ' <span style="color:#e3b341" title="sin ratio: no se puede calcular el CCL">sin ratio</span>';
+    return `<span class="pill">${w.ticker}${w.holding ? ' ★' : ''}${w.type !== 'arg' ? ratio : ''}${pend}
+      <a href="#" style="color:#58a6ff;text-decoration:none" title="editar CEDEAR y ratio" onclick="editTicker('${w.ticker}','${w.cedear || ''}',${w.ratio || 'null'});return false">✎</a>
+      <a href="#" style="color:#f85149;text-decoration:none" title="quitar" onclick="removeTicker('${w.ticker}');return false">✕</a></span>`;
+  }).join('');
   $('#stocks-table tbody').innerHTML = stocksData.map((r, i) => {
-    if (r.error) return `<tr><td>${r.ticker}</td><td colspan="9" class="warn">Error: ${r.error}</td></tr>`;
+    if (r.error) return `<tr><td>${r.ticker}</td><td colspan="10" class="warn">Error: ${r.error}</td></tr>`;
     const c = r.cedear || {}; const ns = r.levels.nearest_support, nr = r.levels.nearest_resistance;
     return `<tr class="clickable" onclick="toggleStock(${i})"><td><b>${r.ticker}</b>${r.holding ? ' ★' : ''}<br><span class="sub" style="color:var(--muted);font-size:.68rem">${r.name}</span></td>
       <td class="num">${fmt(r.price, r.currency)}</td><td class="num">${c.price_ars ? 'AR$' + c.price_ars.toLocaleString('es-AR') : '—'}</td><td class="num">${c.ccl_implicito || '—'}</td>
       <td><span class="pill ${trendClass(r.regime.includes('BULL') ? 'ALCISTA' : r.regime.includes('BEAR') ? 'BAJISTA' : '')}">${r.regime} ${r.bias > 0 ? '+' : ''}${r.bias}</span></td>
-      <td>${r.position}</td><td><span class="action ${actionClass(r.action)}" style="padding:4px 8px;font-size:.75rem">${r.action}</span></td>
+      <td>${r.position}</td><td class="num"><b style="color:${(r.opportunity??0)>=70?'#3fb950':(r.opportunity??0)>=45?'#d29922':'#8b949e'}">${r.opportunity ?? '—'}</b></td><td><span class="action ${actionClass(r.action)}" style="padding:4px 8px;font-size:.75rem">${r.action}</span></td>
       <td class="num">${ns ? fmt(ns.price, r.currency) + '<br><span style="color:var(--muted)">' + ns.distance_pct + '%</span>' : '—'}</td>
       <td class="num">${nr ? fmt(nr.price, r.currency) + '<br><span style="color:var(--muted)">' + (nr.distance_pct > 0 ? '+' : '') + nr.distance_pct + '%</span>' : '—'}</td>
       <td><button class="btn" style="padding:2px 8px" onclick="event.stopPropagation();openChart('${r.ticker}','stock','1d')">📈</button></td></tr>
-      <tr id="stk-${i}" style="display:none"><td colspan="10"><div class="card" style="border:none;padding:6px 0">
-        <div class="action ${actionClass(r.action)}">${r.action}<small>${r.action_detail}</small></div>${trendPills(r)}${ladder(r)}${planBlock(r)}
+      <tr id="stk-${i}" style="display:none"><td colspan="11"><div class="card" style="border:none;padding:6px 0">
+        <div class="action ${actionClass(r.action)}">${r.action}<small>${r.action_detail}</small></div>${trendPills(r)}${ladder(r)}${checksBlock(r)}${planBlock(r)}
         ${(r.warnings || []).map(w => `<div class="warn">⚠ ${w}</div>`).join('')}
         <div class="txt">${r.summary}</div>
         <details><summary>Escenarios</summary>${(r.scenarios || []).map(s => `<p>• ${s.texto}</p>`).join('')}</details></div></td></tr>`;
   }).join('');
 }
 function toggleStock(i) { const e = $('#stk-' + i); e.style.display = e.style.display === 'none' ? '' : 'none'; }
-async function addTicker() { const r = await api('/api/watchlist', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticker: $('#wl-ticker').value, name: $('#wl-name').value, cedear: $('#wl-cedear').value || null, ratio: $('#wl-ratio').value || null, type: $('#wl-type').value, holding: $('#wl-holding').checked})}); if (!r.ok) alert(r.error); else { $('#wl-ticker').value = ''; loadStocks(); } }
-async function removeTicker(t) { if (!confirm('Quitar ' + t + '?')) return; await api('/api/watchlist/' + t, {method: 'DELETE'}); loadStocks(); }
+function wlMsg(txt, color) { $('#wl-msg').innerHTML = `<span style="color:${color || 'var(--muted)'}">${txt}</span>`; }
+async function addTicker() {
+  const t = ($('#wl-ticker').value || '').trim().toUpperCase();
+  if (!t) { wlMsg('Escribí un ticker (por ejemplo MSTR).', '#e3b341'); return; }
+  $('#wl-btn').disabled = true; wlMsg(`Agregando ${t}…`);
+  const r = await api('/api/watchlist', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ticker: t, name: $('#wl-name').value, cedear: $('#wl-cedear').value || null,
+      ratio: $('#wl-ratio').value || null, type: $('#wl-type').value, holding: $('#wl-holding').checked})});
+  $('#wl-btn').disabled = false;
+  if (!r.ok) { wlMsg('No se pudo agregar: ' + r.error, '#f85149'); return; }
+  ['wl-ticker', 'wl-name', 'wl-cedear', 'wl-ratio'].forEach(id => $('#' + id).value = '');
+  $('#wl-holding').checked = false;
+  wlMsg(`${t} agregado. Analizando… aparece en la tabla en unos segundos.`, '#3fb950');
+  await loadStocks();
+  for (const espera of [4000, 6000, 8000, 12000]) {
+    await new Promise(res => setTimeout(res, espera));
+    await loadStocks();
+    const fila = stocksData.find(x => x.ticker === t);
+    if (fila) { wlMsg(fila.error ? `${t}: ${fila.error}` : `${t} listo: ${fila.regime} · ${fila.action}`, fila.error ? '#f85149' : '#3fb950'); return; }
+  }
+  wlMsg(`${t} sigue analizándose. Si no aparece, revisá que el ticker exista en Yahoo Finance.`, '#e3b341');
+}
+async function editTicker(t, cedear, ratio) {
+  const c = prompt(`CEDEAR de ${t} en BYMA (vacío = ninguno)`, cedear || '');
+  if (c === null) return;
+  const rt = prompt(`Ratio de ${t} (cuántos CEDEARs equivalen a 1 acción). Verificalo en BYMA.`, ratio || '');
+  if (rt === null) return;
+  wlMsg(`Actualizando ${t}…`);
+  const r = await api('/api/watchlist/' + t, {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({cedear: c || null, ratio: rt || null})});
+  wlMsg(r.ok ? `${t} actualizado.` : 'Error: ' + r.error, r.ok ? '#3fb950' : '#f85149');
+  setTimeout(loadStocks, 5000);
+}
+async function removeTicker(t) { if (!confirm('Quitar ' + t + '?')) return; await api('/api/watchlist/' + t, {method: 'DELETE'}); wlMsg(`${t} quitado.`); loadStocks(); }
 
 // ── Grafico ──
 let chart, candleSeries, chartCtx = {};
