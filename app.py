@@ -19,8 +19,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from data import CRYPTO_SYMBOLS, fetch_crypto_multi_tf, fetch_kraken, fetch_funding_rate
 from engine import analyze_crypto, apply_btc_filter, build_global_summary
-from stocks import (analyze_watchlist, build_stocks_summary, load_watchlist, add_to_watchlist,
-                    update_watchlist_item, remove_from_watchlist)
+from stocks import (analyze_watchlist, analyze_stock, build_stocks_summary, load_watchlist,
+                    add_to_watchlist, update_watchlist_item, remove_from_watchlist)
 from telegram_bot import (send_message, format_signal_message, format_action_change_message,
                           format_level_message, format_stocks_digest)
 from tracker import save_signal, update_outcomes, get_stats, get_all_signals, get_evolution_report
@@ -199,11 +199,19 @@ def refresh_crypto():
                 continue
             df1h = state["frames_1h"].get(r["name"])
             if df1h is not None:
-                update_outcomes(r["name"], df1h)
-                last = df1h.iloc[-1]
-                paper.update_trades(r["name"], float(last["high"]), float(last["low"]), float(last["close"]),
-                                    r["signal"], r["exhaustion"])
-            _notify_changes(r, r["name"])
+                # Aislado: si falla la medicion de resultados de un activo, el
+                # analisis de los demas y las alertas tienen que seguir andando.
+                try:
+                    update_outcomes(r["name"], df1h)
+                    last = df1h.iloc[-1]
+                    paper.update_trades(r["name"], float(last["high"]), float(last["low"]), float(last["close"]),
+                                        r["signal"], r["exhaustion"])
+                except Exception as e:
+                    print(f"  Aviso: no se pudo actualizar resultados de {r['name']}: {e}")
+            try:
+                _notify_changes(r, r["name"])
+            except Exception as e:
+                print(f"  Aviso: fallo la notificacion de {r['name']}: {e}")
 
         state["crypto"] = clean
         state["crypto_summary"] = build_global_summary(clean)
@@ -240,15 +248,37 @@ def refresh_stocks(notify: bool = True):
         state["last_signal"][r["ticker"]] = r["signal"]
         state["last_action"][r["ticker"]] = r["action"]
     state["stocks"] = results
-    state["stocks_summary"] = build_stocks_summary(results)
-    state["stocks_updated"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    DATA_DIR.mkdir(exist_ok=True)
-    with open(CACHE_STOCKS, "w") as f:
-        json.dump({"results": results, "summary": state["stocks_summary"], "updated": state["stocks_updated"]}, f)
+    _save_stocks_cache()
     save_state()
     if notify and cfg.get("stocks_telegram_digest", True):
         send_message(format_stocks_digest(results, state["stocks_summary"]))
     print(f"  Acciones listo: {len(results)} tickers")
+
+
+def _save_stocks_cache():
+    """Reordena segun la watchlist, recalcula el resumen y persiste el cache."""
+    order = {w["ticker"]: i for i, w in enumerate(load_watchlist())}
+    state["stocks"].sort(key=lambda x: order.get(x.get("ticker"), 999))
+    state["stocks_summary"] = build_stocks_summary(state["stocks"])
+    state["stocks_updated"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    DATA_DIR.mkdir(exist_ok=True)
+    with open(CACHE_STOCKS, "w") as f:
+        json.dump({"results": state["stocks"], "summary": state["stocks_summary"],
+                   "updated": state["stocks_updated"]}, f)
+
+
+def analyze_one_stock(ticker: str):
+    """Analiza un solo ticker y lo mete en la tabla, sin esperar el ciclo completo."""
+    ticker = ticker.upper()
+    item = next((w for w in load_watchlist() if w["ticker"] == ticker), None)
+    if not item:
+        return
+    print(f"  Analizando ticker nuevo: {ticker}...")
+    cfg = load_config()
+    r = sanitize(analyze_stock(item, cfg.get("capital_disponible", 10000), cfg.get("risk_pct", 0.02)))
+    state["stocks"] = [x for x in state["stocks"] if x.get("ticker") != ticker] + [r]
+    _save_stocks_cache()
+    print(f"  {ticker}: " + (r["error"] if r.get("error") else f"{r['price']} | {r['regime']} | {r['action']}"))
 
 
 def check_realtime():
@@ -344,14 +374,33 @@ def api_stocks_refresh():
 def api_watchlist():
     if request.method == "GET":
         return _json(load_watchlist())
-    return _json(add_to_watchlist(request.get_json(force=True) or {}))
+    data = request.get_json(force=True) or {}
+    ticker = (data.get("ticker") or "").strip().upper()
+    # Validacion basica: los tickers son cortos y sin espacios (evita cargar el
+    # nombre de la empresa en el campo equivocado).
+    if not ticker:
+        return _json({"ok": False, "error": "Escribí un ticker"})
+    if " " in ticker or len(ticker) > 12:
+        return _json({"ok": False, "error": f"'{ticker}' no parece un ticker. Usá el símbolo corto (MSTR), el nombre va en el campo de al lado."})
+    res = add_to_watchlist(data)
+    if res.get("ok"):
+        res["analyzing"] = ticker
+        threading.Thread(target=analyze_one_stock, args=(ticker,), daemon=True).start()
+    return _json(res)
 
 
 @app.route("/api/watchlist/<ticker>", methods=["POST", "DELETE"])
 def api_watchlist_item(ticker):
     if request.method == "DELETE":
-        return _json(remove_from_watchlist(ticker))
-    return _json(update_watchlist_item(ticker, request.get_json(force=True) or {}))
+        res = remove_from_watchlist(ticker)
+        if res.get("ok"):
+            state["stocks"] = [x for x in state["stocks"] if x.get("ticker") != ticker.upper()]
+            _save_stocks_cache()
+        return _json(res)
+    res = update_watchlist_item(ticker, request.get_json(force=True) or {})
+    if res.get("ok"):
+        threading.Thread(target=analyze_one_stock, args=(ticker,), daemon=True).start()
+    return _json(res)
 
 
 @app.route("/api/candles/<asset>")

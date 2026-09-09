@@ -109,10 +109,22 @@ def _is_win(pct: float, signal: str, thr: float) -> int:
 
 
 def _price_at(df: pd.DataFrame, when: datetime) -> float | None:
-    """Cierre de la primera vela cuyo tiempo de apertura es >= when."""
+    """
+    Cierre de la primera vela cuyo tiempo de apertura es >= when.
+
+    Ojo con la resolucion temporal: Kraken entrega el indice en segundos
+    (datetime64[s] en pandas 2.x) y las fechas guardadas en la base traen
+    microsegundos. Comparar los dos directamente revienta con
+    "Cannot losslessly convert units", asi que se llevan ambos a nanosegundos,
+    que es una conversion siempre segura.
+    """
     if df is None or len(df) == 0:
         return None
-    idx = df.index.searchsorted(when)
+    try:
+        index = pd.DatetimeIndex(df.index).as_unit("ns")
+        idx = index.searchsorted(pd.Timestamp(when).as_unit("ns"))
+    except Exception:
+        return None
     if idx >= len(df):
         return None
     return float(df["close"].iloc[idx])

@@ -58,7 +58,9 @@ def fetch_kraken(symbol: str, interval: str, limit: int = 720, retries: int = 3)
             pair_key = [k for k in result if k != "last"][0]
             df = pd.DataFrame(result[pair_key], columns=[
                 "open_time", "open", "high", "low", "close", "vwap_raw", "volume", "count"])
-            df["open_time"] = pd.to_datetime(df["open_time"].astype(int), unit="s")
+            # a nanosegundos: Kraken entrega segundos y mezclar resoluciones
+            # rompe las comparaciones con fechas que traen microsegundos
+            df["open_time"] = pd.to_datetime(df["open_time"].astype(int), unit="s").astype("datetime64[ns]")
             for col in ["open", "high", "low", "close", "volume"]:
                 df[col] = df[col].astype(float)
             df = df.set_index("open_time")[["open", "high", "low", "close", "volume"]]
